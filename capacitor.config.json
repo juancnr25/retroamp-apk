@@ -1,0 +1,13 @@
+{
+  "appId": "com.jc.retroamp",
+  "appName": "RetroAmp",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true,
+    "backgroundColor": "#0e0f13"
+  }
+}

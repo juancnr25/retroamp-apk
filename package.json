@@ -1,0 +1,17 @@
+{
+  "name": "retroamp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RetroAmp: reproductor de audio retro con ecualizador, DSP y YouTube (Capacitor)",
+  "scripts": {
+    "android:add": "cap add android && bash scripts/patch-android.sh && cap sync android",
+    "android:sync": "bash scripts/patch-android.sh && cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "6.2.1",
+    "@capacitor/core": "6.2.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "6.2.1"
+  }
+}

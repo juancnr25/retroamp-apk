@@ -1,0 +1,23 @@
+{
+  "name": "RetroAmp · Reproductor retro",
+  "short_name": "RetroAmp",
+  "description": "Reproductor de audio retro con ecualizador de 10 bandas, efectos DSP y YouTube",
+  "lang": "es",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0e0f13",
+  "theme_color": "#15161a",
+  "categories": ["music", "entertainment"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
+}
