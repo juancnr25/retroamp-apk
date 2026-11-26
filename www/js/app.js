@@ -25,7 +25,7 @@ const DEFAULT_SETTINGS = {
   clientsUrl: 'https://raw.githubusercontent.com/juancnr25/retroamp-apk/main/yt-clients.json',
   ytClients: null, ytClientsAt: 0, visitor: null, visitorAt: 0,
   vizMode: 0, customPresets: {}, libSort: 'added', remain: false, tab: 'lib',
-  ytPreload: true, radioFavs: [], radioFilter: 'all', radioGood: {},
+  ytPreload: true, radioFavs: [], radioFilter: 'all', radioGood: {}, libView: 'music',
 };
 
 let settings = structuredClone(DEFAULT_SETTINGS);
@@ -41,7 +41,7 @@ const ytn = nativeAvailable() ? new NativeYouTube(
 const radios = new Radios();
 const tracks = new Map();
 let playlists = [];
-const player = { list: [], order: [], pos: -1, shuffle: false, repeat: 0, cur: null, objUrl: null, coverUrl: null, kbps: 0, token: 0, loading: false, buffering: false, stopped: false, raw: false };
+const player = { list: [], order: [], pos: -1, shuffle: false, repeat: 0, cur: null, objUrl: null, coverUrl: null, kbps: 0, token: 0, loading: false, buffering: false, stopped: false, raw: false, embed: false };
 const view = { tab: 'lib', plId: null };
 let viewIds = [];
 let locked = false;
@@ -187,7 +187,7 @@ function buildFx() {
     fx[key] = new Slider(sd, { ...o, label, onInput: v => { o.apply(v); out.textContent = o.format(v); afterDsp(false); }, onCommit: () => afterDsp(true) });
     fx[key].out = out; out.textContent = o.format(o.value);
   };
-  vrow('volume', 'Volumen', { min: 0, max: 100, step: 1, value: Math.round(s.volume * 100), def: 80, format: v => v + ' %', apply: v => { engine.update({ volume: v / 100 }); rawAudio.volume = Math.pow(v / 100, 2); } });
+  vrow('volume', 'Volumen', { min: 0, max: 100, step: 1, value: Math.round(s.volume * 100), def: 80, format: v => v + ' %', apply: v => { engine.update({ volume: v / 100 }); rawAudio.volume = Math.pow(v / 100, 2); if (player.embed) { try { ytp.setVolume(v); } catch {} } } });
   vrow('balance', 'Balance', { min: -100, max: 100, step: 1, value: Math.round(s.balance * 100), def: 0, zero: 0, format: v => v === 0 ? 'Centro' : (v < 0 ? 'I ' + -v : 'D ' + v), apply: v => engine.update({ balance: v / 100 }) });
 }
 
@@ -323,8 +323,23 @@ async function loadLibrary() {
   all.forEach(t => tracks.set(t.id, t));
   playlists = (await Playlists.getAll()).sort((a, b) => a.created - b.created);
 }
-function libraryIds(sortKey = settings.libSort) {
-  const arr = [...tracks.values()].filter(t => t.kind !== 'yt');
+// La biblioteca se divide en tres vistas: tu música (importada y del teléfono), lo descargado de YouTube y tus radios favoritas
+const LIB_FILTER = {
+  music: t => (t.kind === 'local' && !t.ytId) || t.kind === 'device',
+  yt: t => t.kind === 'local' && !!t.ytId,
+};
+function favStations() {
+  return settings.radioFavs.map(f => { const st = { kind: 'radio', ...f, id: f.id || 'radio:' + f.uuid }; if (!tracks.has(st.id)) tracks.set(st.id, st); return tracks.get(st.id); });
+}
+function libCounts() {
+  let music = 0, yt = 0;
+  for (const t of tracks.values()) { if (LIB_FILTER.music(t)) music++; else if (LIB_FILTER.yt(t)) yt++; }
+  return { music, yt, radios: settings.radioFavs.length };
+}
+function libraryIds(sortKey = settings.libSort, libView = settings.libView) {
+  if (libView === 'radios') return favStations().map(t => t.id);
+  const keep = LIB_FILTER[libView] || LIB_FILTER.music;
+  const arr = [...tracks.values()].filter(keep);
   const cmp = {
     added: (a, b) => (b.addedAt || 0) - (a.addedAt || 0),
     title: (a, b) => (a.title || '').localeCompare(b.title || '', 'es'),
@@ -355,7 +370,19 @@ function setTab(tab) {
   if (showTracks) renderTracks(); else if (tab === 'lists') renderLists();
 }
 
+function renderLibSeg() {
+  const seg = $('libSeg');
+  const show = view.tab === 'lib';
+  seg.hidden = !show;
+  if (!show) return;
+  const c = libCounts();
+  seg.querySelectorAll('[data-lib]').forEach(b => {
+    b.setAttribute('aria-selected', String(b.dataset.lib === settings.libView));
+    b.querySelector('small').textContent = c[b.dataset.lib] || '';
+  });
+}
 function renderTracks() {
+  renderLibSeg();
   const ul = $('tracks');
   const q = $('filter').value.trim().toLowerCase();
   const ids = currentIds();
@@ -370,23 +397,31 @@ function renderTracks() {
     total += t.duration || 0;
     const hay = `${t.title} ${t.artist} ${t.album}`.toLowerCase();
     if (q && !hay.includes(q)) return;
-    const badge = t.kind === 'yt' ? '<span class="badge">YouTube</span>' : t.ytId ? '<span class="badge">Guardado</span>' : '';
     const isCur = id === curId;
+    const live = t.kind === 'radio';
+    const badge = t.kind === 'yt' ? '<span class="badge">En línea</span>' : '';
+    const sub = live ? (isCur && t.now ? t.now : (t.artist || 'Radio en vivo')) : (t.artist || t.album || (t.kind === 'device' ? 'Teléfono' : 'Artista desconocido'));
     rows.push(`<li class="trk${isCur ? ' cur' : ''}" data-id="${esc(id)}">
-      <span class="n">${isCur ? '<span class="eqmini"><i></i><i></i><i></i></span>' : i + 1}</span>
-      <div class="meta"><div class="tt">${esc(t.title || t.name || id)}${badge}</div><div class="ar">${esc(t.artist || t.album || (t.kind === 'device' ? 'Teléfono' : 'Artista desconocido'))}</div></div>
-      <span class="d">${t.duration ? fmt(t.duration) : ''}</span>
+      <span class="n">${isCur ? '<span class="eqmini"><i></i><i></i><i></i></span>' : live ? icon('radio') : i + 1}</span>
+      <div class="meta"><div class="tt">${esc(t.title || t.name || id)}${badge}</div><div class="ar">${esc(sub)}</div></div>
+      <span class="d">${live ? 'En vivo' : t.duration ? fmt(t.duration) : ''}</span>
       <button class="m" data-menu aria-label="Opciones">${icon('more')}</button></li>`);
   });
   if (!rows.length) {
-    rows.push(ids.length ? '<li class="empty">Nada coincide con la búsqueda.</li>' : pl
-      ? '<li class="empty"><b>Lista vacía</b>Agrega pistas desde la biblioteca con el botón de opciones de cada canción, o desde YouTube.</li>'
-      : `<li class="empty"><b>Tu biblioteca está vacía</b>${NATIVE ? 'Escanea la música del teléfono o elige archivos sueltos.' : 'Elige audios del dispositivo o busca en la pestaña YouTube.'}<br>
-        ${NATIVE ? '<button class="btn accent" data-empty="scan">' + icon('scan') + 'Escanear música</button> ' : ''}<button class="btn" data-empty="add">${icon('plus')}Elegir archivos</button></li>`);
+    const lv = settings.libView;
+    let empty;
+    if (ids.length) empty = '<li class="empty">Nada coincide con la búsqueda.</li>';
+    else if (pl) empty = '<li class="empty"><b>Lista vacía</b>Agrega pistas desde la biblioteca con el botón de opciones de cada canción, o desde YouTube.</li>';
+    else if (lv === 'yt') empty = `<li class="empty"><b>Sin descargas de YouTube</b>En la pestaña YouTube toca el botón de descarga de un video. Lo guardado aquí suena sin internet.</li>`;
+    else if (lv === 'radios') empty = `<li class="empty"><b>Sin radios favoritas</b>En la pestaña Radio toca la estrella de tus emisoras para tenerlas aquí.</li>`;
+    else empty = `<li class="empty"><b>Tu música está vacía</b>${NATIVE ? 'Escanea la música del teléfono o elige archivos sueltos.' : 'Elige audios del dispositivo con el botón +.'}<br>
+        ${NATIVE ? '<button class="btn accent" data-empty="scan">' + icon('scan') + 'Escanear música</button> ' : ''}<button class="btn" data-empty="add">${icon('plus')}Elegir archivos</button></li>`;
+    rows.push(empty);
   }
   ul.innerHTML = rows.join('');
-  ul.classList.toggle('paused', audio.paused);
-  $('count').textContent = ids.length ? `${ids.length} ${ids.length === 1 ? 'pista' : 'pistas'} · ${fmt(total)}` : '';
+  ul.classList.toggle('paused', !isPlaying());
+  const n = ids.length;
+  $('count').textContent = !n ? '' : settings.libView === 'radios' && !pl ? `${n} ${n === 1 ? 'radio' : 'radios'}` : `${n} ${n === 1 ? 'pista' : 'pistas'} · ${fmt(total)}`;
 }
 
 function renderLists() {
@@ -422,6 +457,7 @@ async function addFiles(fileList) {
   }
   const pl = curPlaylist();
   if (pl) { pl.trackIds.push(...added); await Playlists.put(pl); }
+  else if (view.tab === 'lib') settings.libView = 'music';
   refreshLists();
   toast(`${added.length} ${added.length === 1 ? 'audio agregado' : 'audios agregados'}`);
   requestPersist();
@@ -444,6 +480,7 @@ async function scanDevice() {
     });
     await Tracks.putMany(batch);
     for (const t of [...tracks.values()]) if (t.kind === 'device' && !seen.has(t.id)) { tracks.delete(t.id); await Tracks.del(t.id); }
+    if (view.tab === 'lib') settings.libView = 'music';
     refreshLists();
     toast(`${batch.length} canciones encontradas en el teléfono`);
   } catch (e) { toast('No se pudo leer la música: ' + (e.message || e), 4500); }
@@ -463,6 +500,13 @@ function addToPlaylist(ids) {
 
 function trackMenu(id) {
   const t = tracks.get(id); if (!t) return;
+  if (t.kind === 'radio') {
+    menu(t.title, [
+      { icon: 'play', label: 'Escuchar', action: () => playFromView(id) },
+      { icon: 'star', label: 'Quitar de favoritas', danger: true, action: () => { toggleFav(id); refreshLists(); } },
+    ]);
+    return;
+  }
   const pl = curPlaylist();
   menu(t.title || 'Pista', [
     { icon: 'play', label: 'Reproducir', action: () => playFromView(id) },
@@ -593,6 +637,8 @@ async function playTrack(id, { autoplay = true, startAt = 0 } = {}) {
   // Detiene con un fundido la canción anterior mientras carga la nueva: así su final no salta a otra pista
   await softPause();
   stopRaw();
+  if (player.embed && !(t.kind === 'yt' && !NATIVE && !settings.ytServer)) stopEmbed();
+  else if (player.embed) { try { ytp.pauseVideo(); } catch {} }
   if (token !== player.token) return;
   if (t.kind !== 'radio') destroyHls();
   updateDisplay(); renderIfTracks(); scrollToCurrent();
@@ -617,10 +663,10 @@ async function playTrack(id, { autoplay = true, startAt = 0 } = {}) {
       player.kbps = t.size && t.duration ? Math.round(t.size * 8 / t.duration / 1000) : 0;
     }
     if (token !== player.token) return;
-    if (startAt && t.kind !== 'radio') { try { audio.currentTime = startAt; } catch {} }
+    if (startAt && t.kind !== 'radio' && !player.embed) { try { audio.currentTime = startAt; } catch {} }
     player.loading = false;
     updateDisplay(); updateMediaSession(); saveSession();
-    if (autoplay && !player.raw) await doPlay();
+    if (autoplay && !player.raw && !player.embed) await doPlay();
     prefetchNextYouTube();
   } catch (e) {
     if (token !== player.token) return;
@@ -692,6 +738,11 @@ function applyYtMeta(t, meta) {
   if (tracks.has(t.id) && t.kind !== 'radio') Tracks.put(t);
 }
 async function playYouTube(t, token) {
+  if (!NATIVE && !settings.ytServer) return playEmbed(t, token);
+  if (!NATIVE) {
+    try { return await playYouTubeStream(t, token); }
+    catch (e) { if (token !== player.token) return; toast('Tu servidor no respondió: uso el reproductor oficial de YouTube.', 3500); return playEmbed(t, token); }
+  }
   if (settings.ytPreload) {
     try {
       const v = await getYouTubeAudio(t.ytId, (g, tot) => {
@@ -930,14 +981,100 @@ audio.addEventListener('waiting', () => {
 audio.addEventListener('playing', () => { player.buffering = false; clearTimeout(stallT); updateDisplay(); });
 audio.addEventListener('error', () => { if (player.cur?.kind === 'radio' && !player.loading) setTimeout(() => radioRecover('error'), 1500); });
 
+
+/* ---- YouTube oficial incrustado (versión web sin servidor, por ejemplo iPhone) ----
+   YouTube no deja procesar el audio de su reproductor: suena sin ecualizador. */
+let ytp = null, ytApi = null, embedTick = null;
+function loadYtApi() {
+  if (window.YT && window.YT.Player) return Promise.resolve();
+  if (ytApi) return ytApi;
+  ytApi = new Promise((res, rej) => {
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => { prev && prev(); res(); };
+    const sc = document.createElement('script');
+    sc.src = 'https://www.youtube.com/iframe_api';
+    sc.onerror = () => { ytApi = null; rej(new Error('no se pudo cargar el reproductor de YouTube')); };
+    document.head.appendChild(sc);
+    setTimeout(() => rej(new Error('YouTube no respondió')), 15000);
+  });
+  return ytApi;
+}
+function embedState() { try { return ytp && ytp.getPlayerState ? ytp.getPlayerState() : -1; } catch { return -1; } }
+function stopEmbed() {
+  clearInterval(embedTick);
+  if (ytp) { try { ytp.stopVideo(); } catch {} }
+  player.embed = false;
+  $('ytEmbedWrap').hidden = true;
+  document.documentElement.classList.remove('embed-mode');
+}
+function onEmbedState(e) {
+  const S = window.YT.PlayerState;
+  player.buffering = e.data === S.BUFFERING;
+  if (e.data === S.PLAYING) {
+    player.loading = false; nativeService(true);
+    // Enlaces pegados: toma el título real del video
+    const t = player.cur;
+    try { const d = ytp.getVideoData(); if (t && d && d.title && (t.title || '').startsWith('Video ')) { t.title = d.title; if (d.author) t.artist = d.author; } } catch {}
+  }
+  if (e.data === S.ENDED) {
+    if (player.repeat === 2) { ytp.seekTo(0, true); ytp.playVideo(); return; }
+    go(1); return;
+  }
+  updateDisplay();
+}
+async function playEmbed(t, token) {
+  await softPause();
+  setMarquee('Abriendo YouTube…');
+  await loadYtApi();
+  if (token !== player.token) return;
+  player.embed = true;
+  $('ytEmbedWrap').hidden = false;
+  document.documentElement.classList.add('embed-mode');
+  if (!ytp) {
+    await new Promise((res, rej) => {
+      const to = setTimeout(() => rej(new Error('YouTube no respondió')), 15000);
+      ytp = new window.YT.Player('ytEmbed', {
+        videoId: t.ytId,
+        playerVars: { playsinline: 1, autoplay: 1, rel: 0, modestbranding: 1 },
+        events: {
+          onReady: () => { clearTimeout(to); res(); },
+          onStateChange: onEmbedState,
+          onError: ev => {
+            const why = { 2: 'enlace inválido', 5: 'error del reproductor', 100: 'el video ya no existe', 101: 'el autor no permite verlo fuera de YouTube', 150: 'el autor no permite verlo fuera de YouTube' }[ev.data] || 'error ' + ev.data;
+            toast('YouTube: ' + why + '. Paso a la siguiente.', 4000);
+            setTimeout(() => go(1), 1500);
+          },
+        },
+      });
+    });
+  } else ytp.loadVideoById(t.ytId);
+  try { ytp.setVolume(Math.round(engine.s.volume * 100)); ytp.playVideo(); } catch {}
+  clearInterval(embedTick);
+  embedTick = setInterval(() => { if (player.embed) updateTime(); }, 500);
+  player.kbps = 0;
+  $('ytStatus').textContent = 'Reproductor oficial de YouTube: suena sin ecualizador. Para el modo completo usa la APK o tu servidor yt-dlp.';
+  // Si el navegador bloquea el inicio automático, avisa
+  setTimeout(() => { if (player.embed && embedState() !== 1 && token === player.token) setMarquee('Toca el video para empezar'); }, 3000);
+}
+function isPlaying() {
+  if (player.embed) return embedState() === 1;
+  if (rawActive()) return !rawAudio.paused;
+  return !audio.paused && !audio.ended;
+}
+function curTime() { if (player.embed) { try { return ytp.getCurrentTime() || 0; } catch { return 0; } } return audio.currentTime || 0; }
+function curDur() { if (player.embed) { try { return ytp.getDuration() || NaN; } catch { return NaN; } } return audio.duration; }
+
 /* ---- Reproducir y pausar con fundido corto (sin clics) ---- */
 async function doPlay() {
+  if (player.embed) { try { ytp.playVideo(); } catch {} return; }
   engine.init(); await engine.resume();
   if (engine.ready) { engine.fader.gain.cancelScheduledValues(engine.ctx.currentTime); engine.fader.gain.setValueAtTime(0, engine.ctx.currentTime); }
   try { await audio.play(); engine.fadeTo(1, 60); }
   catch { engine.fadeTo(1, 0); toast('Toca reproducir para empezar'); }
 }
 async function softPause() {
+  if (player.embed && embedState() === 1) { try { ytp.pauseVideo(); } catch {} }
+  if (rawActive() && !rawAudio.paused) rawAudio.pause();
   if (audio.paused) return;
   if (engine.ready && engine.ctx.state === 'running') { engine.fadeTo(0, 50); await new Promise(r => setTimeout(r, 60)); }
   audio.pause();
@@ -952,7 +1089,7 @@ function nextIndex(dir) {
 }
 function go(dir) {
   if (!player.list.length) { if (viewIds.length) playFromView(viewIds[0]); return; }
-  if (dir < 0 && player.cur?.kind !== 'radio' && audio.currentTime > 4) { audio.currentTime = 0; return; }
+  if (dir < 0 && player.cur?.kind !== 'radio' && curTime() > 4) { if (player.embed) ytp.seekTo(0, true); else audio.currentTime = 0; return; }
   const p = nextIndex(dir);
   if (p < 0) { stop(); return; }
   player.pos = p;
@@ -960,12 +1097,14 @@ function go(dir) {
 }
 async function stop() {
   player.stopped = true;
+  if (player.embed) { try { ytp.pauseVideo(); ytp.seekTo(0, true); } catch {} updateDisplay(); return; }
   await softPause();
   if (player.cur?.kind === 'radio') { destroyHls(); stopRaw(); audio.removeAttribute('src'); audio.load(); clearInterval(metaT); }
   else { try { audio.currentTime = 0; } catch {} }
   updateDisplay();
 }
 function togglePlay() {
+  if (player.embed) { try { embedState() === 1 ? ytp.pauseVideo() : ytp.playVideo(); } catch {} return; }
   engine.init(); engine.resume();
   if (player.cur?.kind === 'radio') {
     // En vivo: pausar corta la transmisión; al reanudar se vuelve a sintonizar al momento actual
@@ -1023,7 +1162,7 @@ function setMarquee(txt) {
 }
 function updateDisplay() {
   const t = player.cur;
-  const playing = rawActive() ? !rawAudio.paused : (!audio.paused && !audio.ended);
+  const playing = isPlaying();
   const live = t?.kind === 'radio';
   $('vfdState').innerHTML = player.loading || player.buffering ? '<span class="spin"></span>' : icon(playing ? (live ? 'live' : 'play') : 'pause');
   $('vfdState').style.opacity = t ? 1 : 0;
@@ -1036,7 +1175,7 @@ function updateDisplay() {
   $('vfdKhz').textContent = khz ? `${(khz / 1000).toFixed(khz % 1000 ? 1 : 0)} kHz` : '-- kHz';
   $('flagSrc').textContent = !t ? 'Local' : live ? 'Radio' : t.kind === 'yt' ? 'YouTube' : t.kind === 'device' ? 'Teléfono' : t.ytId ? 'YouTube' : 'Local';
   $('flagSrc').classList.toggle('on', !!t);
-  if (rawActive()) { $('flagDsp').textContent = 'Sin EQ'; $('flagDsp').classList.add('on'); } else if ($('flagDsp').textContent !== 'DSP') $('flagDsp').textContent = 'DSP';
+  if (rawActive() || player.embed) { $('flagDsp').textContent = 'Sin EQ'; $('flagDsp').classList.add('on'); } else if ($('flagDsp').textContent !== 'DSP') $('flagDsp').textContent = 'DSP';
   $('flagStereo').classList.toggle('on', !!t);
   $('btnShuffle').setAttribute('aria-pressed', String(player.shuffle));
   $('btnRepeat').setAttribute('aria-pressed', String(player.repeat > 0));
@@ -1048,7 +1187,7 @@ function updateDisplay() {
 let lastTimeText = '';
 let seekSlider;
 function updateTime(force = false) {
-  const d = audio.duration, c = audio.currentTime;
+  const d = curDur(), c = curTime();
   const dragging = seekSlider && seekSlider.el.classList.contains('dragging');
   const shown = dragging && isFinite(d) ? seekSlider.value / 1000 * d : c;
   const live = player.cur?.kind === 'radio';
@@ -1238,7 +1377,8 @@ function toggleFav(id) {
   const st = tracks.get(id); if (!st) return;
   if (isFav(st.uuid)) settings.radioFavs = settings.radioFavs.filter(f => f.uuid !== st.uuid);
   else settings.radioFavs.push({ id: st.id, uuid: st.uuid, kind: 'radio', title: st.title, artist: st.artist, url: st.url, md: st.md || null, alt: st.alt || [], favicon: st.favicon, codec: st.codec, bitrate: st.bitrate });
-  saveSettings(); renderRadios();
+  saveSettings();
+  if (!$('paneRadio').hidden) renderRadios(); else refreshLists();
   toast(isFav(st.uuid) ? 'Agregada a favoritas' : 'Quitada de favoritas', 1500);
 }
 
@@ -1299,6 +1439,7 @@ function ytPlay(x) {
 }
 async function ytAddToList(x) { const t = ytTrack(x); tracks.set(t.id, t); await Tracks.put(t); addToPlaylist([t.id]); }
 async function downloadYouTube(x) {
+  if (!NATIVE && !settings.ytServer) { toast('Para guardar canciones de YouTube sin conexión necesitas la APK o tu servidor yt-dlp.', 5000); return; }
   toast('Descargando audio…', 60000);
   for await (const c of ytCandidates(x.id)) {
     try {
@@ -1328,7 +1469,7 @@ async function downloadYouTube(x) {
       await Blobs.put({ id, blob, cover });
       await Tracks.put(t); tracks.set(id, t);
       refreshLists();
-      toast('Guardado en tu biblioteca: ' + title, 3500);
+      toast('Guardado en Biblioteca, YouTube: ' + title, 3500);
       requestPersist();
       return;
     } catch (e) { console.warn('descarga', c.source, e); }
@@ -1506,7 +1647,7 @@ function wireUI() {
   seekSlider = new Slider($('seek'), {
     mode: 'absolute', min: 0, max: 1000, step: 1, value: 0, def: 0, label: 'Posición',
     format: v => fmt(v / 1000 * (audio.duration || 0)),
-    onInput: () => updateTime(), onCommit: v => { const d = audio.duration; if (isFinite(d)) audio.currentTime = v / 1000 * d; },
+    onInput: () => updateTime(), onCommit: v => { const d = curDur(); if (!isFinite(d)) return; if (player.embed) ytp.seekTo(v / 1000 * d, true); else audio.currentTime = v / 1000 * d; },
   });
   $('seek').classList.add('seekbar');
 
@@ -1517,6 +1658,7 @@ function wireUI() {
   ub.addEventListener('pointerdown', e => { ub.setPointerCapture(e.pointerId); ub.classList.add('holding'); holdT = setTimeout(() => { buzz(25); setLocked(false); ub.classList.remove('holding'); }, 800); });
   ['pointerup', 'pointercancel'].forEach(ev => ub.addEventListener(ev, () => { clearTimeout(holdT); ub.classList.remove('holding'); }));
 
+  document.querySelectorAll('[data-lib]').forEach(b => b.onclick = () => { settings.libView = b.dataset.lib; saveSettings(); $('filter').value = ''; renderTracks(); });
   document.querySelectorAll('.tab').forEach(b => b.onclick = () => { if (b.dataset.tab === 'lists' && view.tab === 'lists') view.plId = null; setTab(b.dataset.tab); });
   $('btnAdd').onclick = () => $('fileInput').click();
   $('btnScan').onclick = scanDevice;

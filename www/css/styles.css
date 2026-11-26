@@ -423,3 +423,16 @@ textarea.input { font: 500 13px/1.4 'Barlow SC', sans-serif; resize: vertical; }
 .spin { display: block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--vfd-dim); border-top-color: var(--vfd); animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 370px) { .tab { font-size: 14px; } }
+
+/* Vistas de la biblioteca */
+.lib-seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 10px; width: 100%; }
+.lib-seg .seg-btn { padding: 7px 4px; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lib-seg small { color: var(--faint); font-weight: 500; margin-left: 2px; }
+.lib-seg .seg-btn[aria-selected="true"] small { color: var(--accent); }
+.trk .n .ic { width: 18px; height: 18px; margin: 0 auto; color: var(--accent); }
+
+/* Reproductor oficial de YouTube (web sin servidor) */
+.yt-embed { margin: 10px auto 0; width: min(100%, 356px); aspect-ratio: 16 / 9; border-radius: 14px; overflow: hidden; background: #000; box-shadow: var(--shadow); }
+.yt-embed iframe, .yt-embed #ytEmbed { width: 100%; height: 100%; display: block; border: 0; }
+.embed-mode .viz, .embed-mode .vfd-flags { display: none; }
+.embed-mode .vfd-title { margin-bottom: 2px; }
