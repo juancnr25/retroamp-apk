@@ -156,6 +156,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.search(qs)
             if u.path == '/radio':
                 return self.radio((qs.get('u') or [''])[0], head)
+            if u.path.startswith('/radio/h/'):
+                # Forma de ruta (HLS): /radio/h/<esquema>/<host>/<ruta>?<consulta>
+                scheme, _, rest = u.path[len('/radio/h/'):].partition('/')
+                return self.radio(f'{scheme}://{rest}' + (f'?{u.query}' if u.query else ''), head)
             if u.path.startswith('/stream/'):
                 vid = u.path.split('/')[2]
                 fmt = (qs.get('fmt') or ['opus'])[0]

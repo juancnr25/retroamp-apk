@@ -15,6 +15,28 @@ export const FEATURED = [
   'z rock', 'capital', 'nacional', 'la exitosa', 'radio uno', 'karibeña',
 ];
 
+// Respaldo conocido de emisoras CRP en StreamTheWorld (audio AAC continuo)
+const EXTRA = [
+  { match: 'ritmo romantica', urls: ['https://playerservices.streamtheworld.com/api/livestream-redirect/CRP_RITAAC.aac', 'https://playerservices.streamtheworld.com/api/livestream-redirect/CRP_RIT_SC'] },
+];
+
+// Fuentes en orden de preferencia para una emisora:
+// 1) audio continuo (lo más estable), 2) la variante continua de Mediastream, 3) HLS por segmentos.
+export function radioSources(st) {
+  const out = [];
+  const add = (url, type) => { if (url && !out.some(o => o.url === url && o.type === type)) out.push({ url, type }); };
+  const u = (st.url || '').trim();
+  const md = u.match(/^https?:\/\/(?:[\w-]+\.)*mdstrm\.com\/(?:audio|live-stream-playlist)\/([0-9a-f]{24})/i);
+  const isHls = st.hls || /\.m3u8(\?|$)/i.test(u);
+  if (md) add(`https://mdstrm.com/audio/${md[1]}/icecast.audio`, 'stream');
+  if (!isHls) add(u, 'stream');
+  const n = norm(st.title);
+  for (const e of EXTRA) if (n.includes(e.match)) e.urls.forEach(x => add(x, 'stream'));
+  if (isHls) add(u, 'hls');
+  else add(u, 'hls'); // por si el enlace entrega una lista HLS sin extensión .m3u8
+  return out;
+}
+
 const norm = s => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim();
 
 function nativeHttp() {
@@ -81,7 +103,7 @@ export class Radios {
     const d = await this.call('/json/stations/search?countrycode=PE&hidebroken=true&order=clickcount&reverse=true&limit=400');
     const seen = new Set();
     const list = (Array.isArray(d) ? d : []).map(toStation).filter(s => {
-      if (!s.url || s.hls) return false;
+      if (!s.url) return false;
       const k = norm(s.title);
       if (seen.has(k)) return false;
       seen.add(k);
@@ -92,7 +114,7 @@ export class Radios {
 
   async search(q) {
     const d = await this.call(`/json/stations/search?name=${encodeURIComponent(q)}&hidebroken=true&order=clickcount&reverse=true&limit=60`);
-    return (Array.isArray(d) ? d : []).map(toStation).filter(s => s.url && !s.hls);
+    return (Array.isArray(d) ? d : []).map(toStation).filter(s => s.url);
   }
 
   // Avisa al directorio que la radio se escuchó (ayuda a mantener la lista ordenada)

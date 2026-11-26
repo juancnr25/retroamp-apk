@@ -5,7 +5,7 @@ import { readTags, probeDuration } from './meta.js';
 import { transcode, loadFFmpeg, isCached, isLoaded, RARE_EXT } from './decoder.js';
 import { YouTube, DEFAULT_PIPED, DEFAULT_INVIDIOUS, parseYouTubeId } from './youtube.js';
 import { NativeYouTube, BUILTIN_CONFIG, nativeAvailable } from './ytnative.js';
-import { Radios } from './radio.js';
+import { Radios, radioSources } from './radio.js';
 import { icon, hydrateIcons, Slider, openSheet, closeSheet, wireSheet, drawSevenSeg, vibrate } from './ui.js';
 
 const VERSION = window.RETROAMP_VERSION || '1.2.0';
@@ -25,7 +25,7 @@ const DEFAULT_SETTINGS = {
   clientsUrl: 'https://raw.githubusercontent.com/juancnr25/retroamp-apk/main/yt-clients.json',
   ytClients: null, ytClientsAt: 0, visitor: null, visitorAt: 0,
   vizMode: 0, customPresets: {}, libSort: 'added', remain: false, tab: 'lib',
-  ytPreload: true, radioFavs: [], radioFilter: 'all',
+  ytPreload: true, radioFavs: [], radioFilter: 'all', radioGood: {},
 };
 
 let settings = structuredClone(DEFAULT_SETTINGS);
@@ -593,6 +593,7 @@ async function playTrack(id, { autoplay = true, startAt = 0 } = {}) {
   // Detiene con un fundido la canción anterior mientras carga la nueva: así su final no salta a otra pista
   await softPause();
   if (token !== player.token) return;
+  if (t.kind !== 'radio') destroyHls();
   updateDisplay(); renderIfTracks(); scrollToCurrent();
   setMarquee('Cargando…');
   try {
@@ -749,32 +750,102 @@ function prefetchNextYouTube() {
 
 /* ---- Radio en vivo ---- */
 let radioTries = 0, metaT = null;
-function radioCandidates(t) {
-  const out = [];
-  if (NATIVE) out.push({ url: '/_radio?u=' + encodeURIComponent(t.url), label: 'directo' });
-  else {
-    if (t.url.startsWith('https://')) out.push({ url: t.url, label: 'directo' });
-    if (settings.ytServer) out.push({ url: settings.ytServer + '/radio?u=' + encodeURIComponent(t.url), label: 'tu servidor' });
-  }
-  return out;
+
+/* HLS (radios por segmentos): hls.js se carga solo cuando hace falta */
+let hls = null;
+function destroyHls() { if (hls) { try { hls.destroy(); } catch {} hls = null; } }
+function loadHlsLib() {
+  if (window.Hls) return Promise.resolve(window.Hls);
+  return new Promise((res, rej) => {
+    const sc = document.createElement('script');
+    sc.src = 'vendor/hls/hls.light.min.js';
+    sc.onload = () => res(window.Hls);
+    sc.onerror = () => rej(new Error('no se pudo cargar el decodificador HLS'));
+    document.head.appendChild(sc);
+  });
+}
+async function loadHls(url, via, timeout = 20000) {
+  const Hls = await loadHlsLib();
+  if (!Hls || !Hls.isSupported()) throw new Error('este equipo no soporta HLS');
+  destroyHls();
+  return new Promise((resolve, reject) => {
+    const h = hls = new Hls({
+      enableWorker: true, lowLatencyMode: false, liveSyncDurationCount: 3, maxBufferLength: 40,
+      manifestLoadingMaxRetry: 2, levelLoadingMaxRetry: 3, fragLoadingMaxRetry: 4,
+      xhrSetup: via ? (xhr, u) => { xhr.open('GET', via(u), true); } : undefined,
+    });
+    let settled = false;
+    const to = setTimeout(() => fail(new Error('sin respuesta')), timeout);
+    function cleanup() { clearTimeout(to); audio.removeEventListener('canplay', ok); }
+    function ok() { if (settled) return; settled = true; cleanup(); resolve(); }
+    function fail(e) { if (settled) return; settled = true; cleanup(); if (hls === h) destroyHls(); reject(e); }
+    audio.addEventListener('canplay', ok);
+    h.on(Hls.Events.ERROR, (_, d) => {
+      if (!d.fatal) return;
+      if (!settled) { fail(new Error('HLS ' + (d.details || d.type))); return; }
+      if (d.type === Hls.ErrorTypes.NETWORK_ERROR) h.startLoad();
+      else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) h.recoverMediaError();
+      else setTimeout(() => radioRecover('error'), 1000);
+    });
+    h.attachMedia(audio);
+    h.loadSource(url);
+  });
+}
+
+// Envuelve una URL en forma de ruta (/h/<esquema>/<host>/<ruta>) para que HLS resuelva sus segmentos
+// relativos contra la ruta original de la emisora y no contra el proxy.
+function pathWrapper(base) {
+  const abs = new URL(base, location.href).href.replace(/\/+$/, '');
+  const baseOrigin = new URL(abs).origin;
+  let lastUp = '';
+  return u => {
+    if (u.startsWith(abs + '/h/')) return u;                 // ya envuelta (segmento relativo resuelto)
+    if (u.startsWith(baseOrigin + '/') && lastUp) u = lastUp + u.slice(baseOrigin.length);   // ruta absoluta del sitio
+    const x = new URL(u);
+    lastUp = x.origin;
+    return `${abs}/h/${x.protocol.replace(':', '')}/${x.host}${x.pathname}${x.search}`;
+  };
+}
+// Caminos para llegar a una radio: en la APK el proxy nativo; en la web directo (https) o por tu servidor
+function radioRoutes(url) {
+  const enc = encodeURIComponent;
+  if (NATIVE) return [{ label: 'app', wrap: u => '/_radio?u=' + enc(u), hlsWrap: () => pathWrapper('/_radio') }];
+  const r = [];
+  if (url.startsWith('https://')) r.push({ label: 'directo', wrap: null, hlsWrap: () => null });
+  if (settings.ytServer) r.push({ label: 'tu servidor', wrap: u => settings.ytServer + '/radio?u=' + enc(u), hlsWrap: () => pathWrapper(settings.ytServer + '/radio') });
+  return r;
 }
 async function playRadio(t, token) {
-  const cands = radioCandidates(t);
-  if (!cands.length) throw new Error('Esta radio transmite por http: en la versión web necesitas tu servidor yt-dlp (Ajustes) o la APK.');
+  let srcs = radioSources(t);
+  const good = (settings.radioGood || {})[t.uuid];
+  if (good) srcs = [...srcs.filter(s => s.url === good.url && s.type === good.type), ...srcs.filter(s => !(s.url === good.url && s.type === good.type))];
+  const plan = [];
+  for (const s of srcs) for (const r of radioRoutes(s.url)) plan.push({ s, r });
+  if (!plan.length) throw new Error('Esta radio transmite por http: en la versión web necesitas tu servidor yt-dlp (Ajustes) o la APK.');
   const tried = [];
-  for (const c of cands) {
+  for (let i = 0; i < plan.length; i++) {
+    const { s, r } = plan[i];
     if (token !== player.token) return;
-    setMarquee('Sintonizando ' + t.title + '…');
+    setMarquee(`Sintonizando ${t.title}${plan.length > 1 ? ` (${i + 1} de ${plan.length})` : ''}…`);
     try {
-      await loadSrc(c.url, 20000);
+      if (s.type === 'hls') { const w = r.hlsWrap(); await loadHls(w ? w(s.url) : s.url, w); }
+      else { destroyHls(); await loadSrc(r.wrap ? r.wrap(s.url) : s.url, 15000); }
+      if (token !== player.token) return;
       player.kbps = t.bitrate || 0;
       radioTries = 0;
+      settings.radioGood = { ...(settings.radioGood || {}), [t.uuid]: { url: s.url, type: s.type } };
+      saveSettings();
       radios.click(t.uuid);
       startRadioMeta(t);
       return;
-    } catch (e) { tried.push(`${c.label}: ${e.message || e}`); }
+    } catch (e) {
+      destroyHls();
+      tried.push(`${s.type === 'hls' ? 'HLS' : 'audio'} ${r.label}: ${e.message || e}`);
+    }
   }
-  throw new Error('La radio no responde (' + tried.join(' · ') + '). Prueba otra emisora.');
+  console.warn('radio', t.title, tried);
+  if (settings.radioGood?.[t.uuid]) { delete settings.radioGood[t.uuid]; saveSettings(); }
+  throw new Error(`${t.title} no responde en este momento. Prueba otra emisora o vuelve a intentar en unos minutos.`);
 }
 function startRadioMeta(t) {
   clearInterval(metaT);
@@ -840,7 +911,7 @@ function go(dir) {
 async function stop() {
   player.stopped = true;
   await softPause();
-  if (player.cur?.kind === 'radio') { audio.removeAttribute('src'); audio.load(); clearInterval(metaT); }
+  if (player.cur?.kind === 'radio') { destroyHls(); audio.removeAttribute('src'); audio.load(); clearInterval(metaT); }
   else { try { audio.currentTime = 0; } catch {} }
   updateDisplay();
 }

@@ -1,10 +1,11 @@
 // RetroAmp · Service Worker (offline-first). Sube VERSION en cada despliegue.
-const VERSION = 'retroamp-v1.2.0';
+const VERSION = 'retroamp-v1.2.1';
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/styles.css',
   'js/app.js', 'js/db.js', 'js/engine.js', 'js/meta.js', 'js/decoder.js', 'js/youtube.js', 'js/ytnative.js', 'js/ui.js', 'js/radio.js',
   'vendor/ffmpeg/index.js', 'vendor/ffmpeg/classes.js', 'vendor/ffmpeg/const.js', 'vendor/ffmpeg/errors.js',
   'vendor/ffmpeg/types.js', 'vendor/ffmpeg/utils.js', 'vendor/ffmpeg/worker.js',
+  'vendor/hls/hls.light.min.js',
   'fonts/barlow-latin-400-normal.woff2', 'fonts/barlow-latin-500-normal.woff2', 'fonts/barlow-latin-600-normal.woff2',
   'fonts/barlow-latin-ext-400-normal.woff2', 'fonts/barlow-latin-ext-500-normal.woff2', 'fonts/barlow-latin-ext-600-normal.woff2',
   'fonts/barlow-semi-condensed-latin-500-normal.woff2', 'fonts/barlow-semi-condensed-latin-600-normal.woff2',
