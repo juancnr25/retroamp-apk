@@ -57,7 +57,8 @@ export class YouTube {
     const piped = (c.pipedList || DEFAULT_PIPED).map(trim).filter(Boolean);
     const inv = (c.invList || DEFAULT_INVIDIOUS).map(trim).filter(Boolean);
     const sticky = (list, good) => good && list.includes(good) ? [good, ...list.filter(x => x !== good)] : list;
-    const pub = [
+    const usePublic = c.usePublic !== false;
+    const pub = !usePublic ? [] : [
       ...sticky(piped, this.lastGood.piped).map(u => ({ type: 'piped', base: u })),
       ...sticky(inv, this.lastGood.inv).map(u => ({ type: 'inv', base: u })),
     ];

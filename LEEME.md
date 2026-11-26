@@ -1,15 +1,26 @@
-# RetroAmp · APK con Capacitor (compilada en GitHub Actions)
+# RetroAmp 1.1 · APK con Capacitor (compilada en GitHub Actions)
 
-Misma app que la PWA, más tres funciones nativas:
+Misma app que la PWA, más funciones nativas:
 
-- **ESCANEAR MÚSICA**: lee toda la música del teléfono (MediaStore) sin copiarla.
-- **Servicio en primer plano**: la música sigue sonando con la pantalla apagada (notificación "RetroAmp").
-- **Servidor yt-dlp por Wi-Fi**: la APK puede usar tu laptop (`http://192.168.x.x:8765`), cosa que la PWA no permite.
+- **YouTube directo**: la app pide el audio a YouTube desde tu teléfono, sin servidores intermedios. Un proxy interno (`YtProxy.java`) entrega el audio con soporte de adelantar y retroceder.
+- **Escanear música**: lee toda la música del teléfono (MediaStore) sin copiarla.
+- **Servicio en primer plano**: la música sigue sonando con la pantalla apagada.
+- **Firma fija** (`signing/debug.keystore`): cada APK nueva se instala encima de la anterior y conservas tu biblioteca.
+
+## Cambios de la 1.1
+
+- YouTube funciona sin configurar nada. Si YouTube cambia su sistema, editas `yt-clients.json` en tu repositorio y la app lo descarga sola (una vez al día o con Ajustes > Actualizar clientes). No necesitas recompilar.
+- Ajustes > Probar YouTube directo muestra qué cliente funcionó o el motivo exacto del fallo.
+- Interfaz nueva: el ecualizador, los efectos y el volumen viven en paneles que abres con los botones Sonido y Volumen. Los deslizadores solo cambian si arrastras, un toque accidental no los mueve. El candado de arriba bloquea toda la pantalla (para el bolsillo); se desbloquea manteniendo presionado.
+
+**Importante si ya instalaste la 1.0:** la 1.0 se firmó con una llave temporal. Desinstálala una sola vez antes de instalar la 1.1. Desde la 1.1 las actualizaciones se instalan encima.
+
+**Repositorio público o privado:** `yt-clients.json` se descarga desde `raw.githubusercontent.com`, y eso solo funciona si el repositorio es público. Si lo prefieres privado, la app usa la configuración incluida y puedes pegar otra dirección en Ajustes. La llave de `signing/` es de depuración: sirve para tus equipos, no la uses para publicar en Play Store.
 
 ## Compilar la APK en GitHub (desde el celular o la PC)
 
 1. Crea un repositorio nuevo en github.com, por ejemplo `retroamp-apk`.
-2. Sube el contenido de esta carpeta a la raíz del repo: `www/`, `native/`, `scripts/`, `android-res/`, `server/`, `package.json`, `capacitor.config.json`.
+2. Sube el contenido de esta carpeta a la raíz del repo: `www/`, `native/`, `scripts/`, `android-res/`, `signing/`, `server/`, `package.json`, `capacitor.config.json`, `yt-clients.json`.
 3. La carpeta `.github` empieza con punto y muchos exploradores de Android la ocultan. Si no la ves, créala desde GitHub:
    Add file → Create new file → nombre `.github/workflows/build-apk.yml` → pega el contenido del archivo `build-apk.yml` incluido (copia en `workflow-build-apk.yml`) → Commit.
 4. Ve a la pestaña **Actions** → "Compilar APK de RetroAmp". Arranca solo con cada commit; también puedes lanzarlo con **Run workflow**.
@@ -20,7 +31,7 @@ Con Termux y git también puedes subirlo así:
 
 ```bash
 cd retroamp-apk
-git init && git add -A && git commit -m "RetroAmp 1.0.0"
+git init && git add -A && git commit -m "RetroAmp 1.1.0"
 git branch -M main
 git remote add origin https://github.com/juancnr25/retroamp-apk.git
 git push -u origin main
@@ -41,3 +52,10 @@ Cambia lo que necesites en `www/`, sube el cambio y GitHub compila una APK nueva
 - Capacitor 6.2.1, Java 17, compileSdk 34, minSdk 22 (Android 5.1+).
 - `scripts/patch-android.sh` copia el plugin nativo (`native/*.java`), íconos, splash, permisos y el servicio al proyecto que genera `npx cap add android`.
 - La APK que sale es de depuración (debug): sirve para instalar en tus equipos, no para Play Store.
+
+## Si YouTube deja de funcionar
+
+1. Abre Ajustes > Probar YouTube directo y lee el resultado.
+2. Si todos los clientes fallan, revisa qué clientes usa la última versión de yt-dlp (archivo `yt_dlp/extractor/youtube/_base.py`, sección `INNERTUBE_CLIENTS`) y copia nombre, versión y userAgent en `yt-clients.json`.
+3. Sube el cambio a GitHub y toca Actualizar clientes en la app.
+4. Mientras tanto, el servidor yt-dlp en Termux (`server/`) sirve de respaldo.

@@ -35,7 +35,14 @@ jobs:
           npx cap add android
 
       - name: Aplicar código nativo de RetroAmp
+        env:
+          VERSION_CODE: ${{ github.run_number }}0
         run: bash scripts/patch-android.sh
+
+      - name: Firma fija (permite actualizar sin desinstalar)
+        run: |
+          mkdir -p ~/.android
+          cp signing/debug.keystore ~/.android/debug.keystore
 
       - name: Sincronizar web con Android
         run: npx cap sync android

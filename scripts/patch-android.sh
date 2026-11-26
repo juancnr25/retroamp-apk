@@ -42,4 +42,30 @@ if '.PlaybackService' not in s:
 open(p, 'w', encoding='utf-8').write(s)
 print('AndroidManifest.xml listo')
 PY
+# Versión de la app (versionName desde package.json, versionCode creciente con cada compilación)
+VNAME=$(python3 -c "import json;print(json.load(open('package.json'))['version'])")
+VCODE=${VERSION_CODE:-110}
+sed -i -E "s/versionCode [0-9]+/versionCode ${VCODE}/; s/versionName \"[^\"]*\"/versionName \"${VNAME}\"/" android/app/build.gradle
+echo "Versión ${VNAME} (${VCODE})"
+
+# Firma fija: todas las compilaciones usan la misma llave, así cada APK nueva se instala encima de la anterior
+if ! grep -q "retroamp-signing" android/app/build.gradle; then
+  python3 - <<'PY2'
+p = 'android/app/build.gradle'
+s = open(p, encoding='utf-8').read()
+block = """android {
+    // retroamp-signing
+    signingConfigs {
+        debug {
+            storeFile file("../../signing/debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+    }
+"""
+s = s.replace("android {\n", block, 1)
+open(p, 'w', encoding='utf-8').write(s)
+PY2
+fi
 echo "Parche nativo aplicado"

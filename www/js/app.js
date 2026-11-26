@@ -1,44 +1,47 @@
-// RetroAmp · Aplicación principal
+// RetroAmp 1.1 · Aplicación principal
 import { Tracks, Blobs, Playlists, kvGet, kvSet, storageInfo, requestPersist } from './db.js';
 import { AudioEngine, EQ_FREQS, EQ_LABELS, PRESETS, DEFAULT_DSP } from './engine.js';
 import { readTags, probeDuration } from './meta.js';
 import { transcode, loadFFmpeg, isCached, isLoaded, RARE_EXT } from './decoder.js';
 import { YouTube, DEFAULT_PIPED, DEFAULT_INVIDIOUS, parseYouTubeId } from './youtube.js';
+import { NativeYouTube, BUILTIN_CONFIG, nativeAvailable } from './ytnative.js';
+import { icon, hydrateIcons, Slider, openSheet, closeSheet, wireSheet, drawSevenSeg, vibrate } from './ui.js';
 
-const VERSION = window.RETROAMP_VERSION || '1.0.0';
+const VERSION = window.RETROAMP_VERSION || '1.1.0';
 const $ = id => document.getElementById(id);
 const Cap = window.Capacitor;
 const NATIVE = !!(Cap && typeof Cap.isNativePlatform === 'function' && Cap.isNativePlatform());
-// Puente al plugin nativo (APK). Se usa nativePromise del bridge de Capacitor, sin empaquetador.
 const Native = NATIVE && typeof Cap.nativePromise === 'function' ? {
   scan: () => Cap.nativePromise('RetroNative', 'scan', {}),
   startService: o => Cap.nativePromise('RetroNative', 'startService', o || {}),
   stopService: () => Cap.nativePromise('RetroNative', 'stopService', {}),
 } : null;
-const LIB = '__lib';
 
 const DEFAULT_SETTINGS = {
   theme: 'dark', haptics: true, resume: true,
-  ytServer: '', ytPriority: 'server', ytFormat: 'opus',
+  ytServer: '', ytPriority: 'server', ytFormat: 'opus', usePublic: !NATIVE,
   pipedList: DEFAULT_PIPED, invList: DEFAULT_INVIDIOUS,
-  vizMode: 0, showWins: { winEq: true, winDsp: true, winPl: true, winYt: true }, shaded: {},
-  customPresets: {}, libSort: 'added', remain: false,
+  clientsUrl: 'https://raw.githubusercontent.com/juancnr25/retroamp-apk/main/yt-clients.json',
+  ytClients: null, ytClientsAt: 0, visitor: null, visitorAt: 0,
+  vizMode: 0, customPresets: {}, libSort: 'added', remain: false, tab: 'lib',
 };
 
 let settings = structuredClone(DEFAULT_SETTINGS);
 const audio = $('audio');
 const engine = new AudioEngine(audio);
 const yt = new YouTube(() => settings);
+const ytn = nativeAvailable() ? new NativeYouTube(
+  () => (settings.ytClients && Array.isArray(settings.ytClients.clients)) ? settings.ytClients : BUILTIN_CONFIG,
+  v => { settings.visitor = v; settings.visitorAt = Date.now(); saveSettings(); },
+  () => (settings.visitor && Date.now() - settings.visitorAt < 6 * 3600e3) ? settings.visitor : null,
+) : null;
+
 const tracks = new Map();
 let playlists = [];
-
-const player = {
-  plId: LIB, list: [], order: [], pos: -1,
-  shuffle: false, repeat: 0, // 0 no, 1 todo, 2 una
-  cur: null, objUrl: null, coverUrl: null, kbps: 0, token: 0, loading: false,
-};
+const player = { list: [], order: [], pos: -1, shuffle: false, repeat: 0, cur: null, objUrl: null, coverUrl: null, kbps: 0, token: 0, loading: false };
+const view = { tab: 'lib', plId: null };
 let viewIds = [];
-let selectedId = null;
+let locked = false;
 
 /* ================= Utilidades ================= */
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -53,144 +56,177 @@ function fmt(sec) {
 }
 const host = u => { try { return new URL(u).host; } catch { return u; } };
 const MIME = { mp3: 'audio/mpeg', m4a: 'audio/mp4', mp4: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', flac: 'audio/flac', wav: 'audio/wav', webm: 'audio/webm', weba: 'audio/webm' };
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
 let toastT;
-function toast(msg, ms = 2600) {
+function toast(msg, ms = 2800) {
   const t = $('toast');
   t.textContent = msg; t.hidden = false;
   clearTimeout(toastT);
   toastT = setTimeout(() => { t.hidden = true; }, ms);
 }
-function buzz(ms = 8) { if (settings.haptics && navigator.vibrate) { try { navigator.vibrate(ms); } catch {} } }
-
+const buzz = (ms = 8) => vibrate(settings.haptics, ms);
 const saveSettings = () => kvSet('settings', settings);
 let dspSaveT;
 const saveDsp = () => { clearTimeout(dspSaveT); dspSaveT = setTimeout(() => kvSet('dsp', engine.s), 300); };
 
-/* ================= Hojas (menús y diálogos) ================= */
-function openSheet(title, build) {
-  $('sheetTitle').textContent = title;
-  const body = $('sheetBody');
+/* ================= Menús y diálogos ================= */
+function menu(title, items) {
+  $('menuTitle').textContent = title;
+  const body = $('menuBody');
   body.innerHTML = '';
-  build(body);
-  $('sheet').hidden = false;
+  for (const it of items) {
+    if (!it) continue;
+    const b = document.createElement('button');
+    b.className = 'mi' + (it.danger ? ' danger' : '') + (it.sel ? ' sel' : '');
+    b.innerHTML = icon(it.icon || 'check') + `<span>${esc(it.label)}</span>`;
+    b.onclick = () => { closeSheet($('sheetMenu')); setTimeout(() => it.action(), 30); };
+    body.appendChild(b);
+  }
+  openSheet($('sheetMenu'));
 }
-function closeSheet() { $('sheet').hidden = true; }
-function sheetButton(body, label, fn, cls = '') {
-  const b = document.createElement('button');
-  b.className = 'tog ' + cls; b.textContent = label;
-  b.onclick = () => { closeSheet(); fn(); };
-  body.appendChild(b);
-  return b;
-}
-function askText(title, placeholder = '', value = '') {
+function askText(title, placeholder = '', value = '', okLabel = 'Guardar') {
   return new Promise(resolve => {
-    openSheet(title, body => {
-      const inp = document.createElement('input');
-      inp.className = 'lcd-input'; inp.placeholder = placeholder; inp.value = value;
-      const ok = document.createElement('button'); ok.className = 'tog'; ok.textContent = 'ACEPTAR';
-      const done = () => { closeSheet(); resolve(inp.value.trim() || null); };
-      ok.onclick = done;
-      inp.onkeydown = e => { if (e.key === 'Enter') done(); };
-      body.append(inp, ok);
-      setTimeout(() => inp.focus(), 50);
-    });
-    $('sheet').dataset.cancel = '1';
-    sheetCancel = () => resolve(null);
+    let done = false;
+    $('menuTitle').textContent = title;
+    const body = $('menuBody');
+    body.innerHTML = '';
+    const inp = document.createElement('input');
+    inp.className = 'input'; inp.placeholder = placeholder; inp.value = value;
+    const ok = document.createElement('button'); ok.className = 'btn accent'; ok.textContent = okLabel;
+    const finish = v => { if (done) return; done = true; resolve(v); };
+    ok.onclick = () => { const v = inp.value.trim() || null; finish(v); closeSheet($('sheetMenu')); };
+    inp.onkeydown = e => { if (e.key === 'Enter') ok.click(); };
+    body.append(inp, ok);
+    openSheet($('sheetMenu'), () => finish(null));
+    setTimeout(() => inp.focus(), 280);
   });
 }
-function confirmSheet(title, msg, okLabel = 'SÍ, CONTINUAR') {
+function confirmBox(title, msg, okLabel) {
   return new Promise(resolve => {
-    openSheet(title, body => {
-      const p = document.createElement('p'); p.className = 'muted'; p.style.fontFamily = 'VT323,monospace'; p.style.fontSize = '18px'; p.textContent = msg;
-      body.appendChild(p);
-      sheetButton(body, okLabel, () => resolve(true), 'danger');
-      sheetButton(body, 'CANCELAR', () => resolve(false));
-    });
-    sheetCancel = () => resolve(false);
+    let done = false;
+    const finish = v => { if (!done) { done = true; resolve(v); } };
+    $('menuTitle').textContent = title;
+    const body = $('menuBody');
+    body.innerHTML = `<p>${esc(msg)}</p>`;
+    const ok = document.createElement('button'); ok.className = 'mi danger'; ok.innerHTML = icon('trash') + `<span>${esc(okLabel)}</span>`;
+    const no = document.createElement('button'); no.className = 'mi'; no.innerHTML = icon('close') + '<span>Cancelar</span>';
+    ok.onclick = () => { finish(true); closeSheet($('sheetMenu')); };
+    no.onclick = () => { finish(false); closeSheet($('sheetMenu')); };
+    body.append(ok, no);
+    openSheet($('sheetMenu'), () => finish(false));
   });
 }
-let sheetCancel = null;
-document.querySelectorAll('.sheet').forEach(sh => {
-  sh.addEventListener('click', e => {
-    if (e.target === sh || e.target.closest('[data-close]')) {
-      sh.hidden = true;
-      if (sh.id === 'sheet' && sheetCancel) { const c = sheetCancel; sheetCancel = null; c(); }
-    }
-  });
-});
 
-/* ================= Tema y ventanas ================= */
+/* ================= Tema ================= */
 const THEMES = ['dark', 'light', 'neon'];
-const THEME_COLOR = { dark: '#15161a', light: '#dfe3ea', neon: '#000000' };
+const THEME_NAME = { dark: 'Grafito', light: 'Blanco', neon: 'Verde neón' };
 function applyTheme() {
   document.documentElement.dataset.theme = settings.theme;
-  document.querySelector('meta[name=theme-color]').setAttribute('content', THEME_COLOR[settings.theme]);
+  document.querySelector('meta[name=theme-color]').setAttribute('content', { dark: '#1a1d23', light: '#e9ebef', neon: '#050806' }[settings.theme]);
   document.querySelectorAll('[data-theme-set]').forEach(b => b.classList.toggle('active', b.dataset.themeSet === settings.theme));
-  vizColors = null;
-  drawCurve();
-}
-function applyWindows() {
-  for (const [id, show] of Object.entries(settings.showWins)) {
-    $(id)?.classList.toggle('hidden', !show);
-    const b = document.querySelector(`[data-win="${id}"]`);
-    if (b) b.setAttribute('aria-pressed', String(!!show));
-  }
-  for (const [id, sh] of Object.entries(settings.shaded || {})) $(id)?.classList.toggle('shaded', !!sh);
+  vizColors = null; lastTimeText = '';
+  updateTime(true); drawCurve(); drawViz(performance.now(), true);
 }
 
-/* ================= Ecualizador ================= */
-const sliders = [];
-function makeVSlider(label, get, set) {
-  const wrap = document.createElement('div'); wrap.className = 'vs';
-  const val = document.createElement('div'); val.className = 'vs-val';
-  const track = document.createElement('div'); track.className = 'vs-track';
-  const fill = document.createElement('div'); fill.className = 'vs-fill';
-  const thumb = document.createElement('div'); thumb.className = 'vs-thumb';
-  const lbl = document.createElement('span'); lbl.className = 'vs-lbl'; lbl.textContent = label;
-  track.append(fill, thumb); wrap.append(val, track, lbl);
-  const render = () => {
-    const v = get();
-    const pos = (12 - v) / 24 * 100;
-    thumb.style.top = pos + '%';
-    fill.style.top = Math.min(pos, 50) + '%';
-    fill.style.bottom = (100 - Math.max(pos, 50)) + '%';
-    val.textContent = (v > 0 ? '+' : '') + (Math.round(v * 2) / 2);
-  };
-  let drag = false, lastTap = 0;
-  const fromY = y => {
-    const r = track.getBoundingClientRect();
-    const v = 12 - clamp((y - r.top) / r.height, 0, 1) * 24;
-    return Math.round(v * 2) / 2;
-  };
-  track.addEventListener('pointerdown', e => {
-    const now = Date.now();
-    if (now - lastTap < 300) { set(0); render(); lastTap = 0; return; }
-    lastTap = now;
-    drag = true; track.setPointerCapture(e.pointerId);
-    set(fromY(e.clientY)); render();
-  });
-  track.addEventListener('pointermove', e => { if (drag) { set(fromY(e.clientY)); render(); } });
-  const end = () => { drag = false; };
-  track.addEventListener('pointerup', end); track.addEventListener('pointercancel', end);
-  sliders.push(render);
-  render();
-  return wrap;
-}
-
+/* ================= Sonido: ecualizador y efectos ================= */
+const eqSliders = [];
+let preampSlider;
 function buildEq() {
   const box = $('eqSliders');
   box.innerHTML = '';
-  box.appendChild(makeVSlider('PREAMP', () => engine.s.preamp, v => { engine.update({ preamp: v }); afterDsp(); }));
+  const col = (label, get, set) => {
+    const c = document.createElement('div'); c.className = 'eq-col';
+    const v = document.createElement('div'); v.className = 'eq-val';
+    const s = document.createElement('div');
+    const l = document.createElement('div'); l.className = 'eq-lbl'; l.textContent = label;
+    c.append(v, s, l); box.appendChild(c);
+    const showV = x => { v.textContent = (x > 0 ? '+' : '') + (Math.round(x * 2) / 2); };
+    const sl = new Slider(s, {
+      orientation: 'v', min: -12, max: 12, step: 0.5, value: get(), def: 0, zero: 0, label: label + ' dB',
+      format: x => (x > 0 ? '+' : '') + x + ' dB',
+      onInput: x => { set(x); showV(x); afterDsp(false); }, onCommit: () => afterDsp(true),
+    });
+    sl.showV = showV; showV(get());
+    return sl;
+  };
+  preampSlider = col('Pre', () => engine.s.preamp, x => engine.update({ preamp: x }));
   const sep = document.createElement('div'); sep.className = 'eq-sep'; box.appendChild(sep);
-  EQ_FREQS.forEach((f, i) => {
-    box.appendChild(makeVSlider(EQ_LABELS[i], () => engine.s.eq[i], v => { engine.setBand(i, v); afterDsp(); }));
-  });
+  EQ_FREQS.forEach((f, i) => eqSliders.push(col(EQ_LABELS[i].replace('K', 'k'), () => engine.s.eq[i], x => engine.setBand(i, x))));
 }
 
-// Curva calculada con filtros espejo en un OfflineAudioContext (no requiere gesto del usuario)
+const fx = {};
+function buildFx() {
+  const box = $('fxSliders');
+  const row = (key, label, o) => {
+    const r = document.createElement('div'); r.className = 'fx-row';
+    const sp = document.createElement('span'); sp.textContent = label;
+    const s = document.createElement('div');
+    const out = document.createElement('output');
+    r.append(sp, s, out); box.appendChild(r);
+    fx[key] = new Slider(s, { ...o, label, onInput: v => { o.apply(v); out.textContent = o.format(v); afterDsp(false); }, onCommit: () => afterDsp(true) });
+    fx[key].out = out; out.textContent = o.format(o.value);
+  };
+  const s = engine.s;
+  const db = v => (v > 0 ? '+' : '') + v + ' dB';
+  row('bass', 'Graves', { min: -12, max: 12, step: 0.5, value: s.bass, def: 0, zero: 0, format: db, apply: v => engine.update({ bass: v }) });
+  row('treble', 'Agudos', { min: -12, max: 12, step: 0.5, value: s.treble, def: 0, zero: 0, format: db, apply: v => engine.update({ treble: v }) });
+  row('width', 'Estéreo', { min: 0, max: 200, step: 5, value: Math.round(s.width * 100), def: 100, zero: 100, format: v => v + ' %', apply: v => engine.update({ width: v / 100 }) });
+  row('revMix', 'Reverb', { min: 0, max: 100, step: 1, value: Math.round(s.reverbMix * 100), def: 0, format: v => v + ' %', apply: v => engine.update({ reverbMix: v / 100 }) });
+  row('revSize', 'Sala', { min: 0.5, max: 6, step: 0.1, value: s.reverbSize, def: 2.2, format: v => (+v).toFixed(1) + ' s', apply: v => engine.update({ reverbSize: v }) });
+
+  const vb = $('volSliders');
+  const vrow = (key, label, o) => {
+    const r = document.createElement('div'); r.className = 'fx-row';
+    const sp = document.createElement('span'); sp.textContent = label;
+    const sd = document.createElement('div'); const out = document.createElement('output');
+    r.append(sp, sd, out); vb.appendChild(r);
+    fx[key] = new Slider(sd, { ...o, label, onInput: v => { o.apply(v); out.textContent = o.format(v); afterDsp(false); }, onCommit: () => afterDsp(true) });
+    fx[key].out = out; out.textContent = o.format(o.value);
+  };
+  vrow('volume', 'Volumen', { min: 0, max: 100, step: 1, value: Math.round(s.volume * 100), def: 80, format: v => v + ' %', apply: v => engine.update({ volume: v / 100 }) });
+  vrow('balance', 'Balance', { min: -100, max: 100, step: 1, value: Math.round(s.balance * 100), def: 0, zero: 0, format: v => v === 0 ? 'Centro' : (v < 0 ? 'I ' + -v : 'D ' + v), apply: v => engine.update({ balance: v / 100 }) });
+}
+
+function renderPresets() {
+  const box = $('presets');
+  const all = { ...PRESETS, ...settings.customPresets };
+  box.innerHTML = Object.keys(all).map(n => `<button class="pchip${engine.s.preset === n ? ' on' : ''}" data-preset="${esc(n)}">${esc(n)}</button>`).join('') +
+    '<button class="pchip add" data-preset-add>Guardar actual</button>';
+}
+
+function syncDspUI() {
+  const s = engine.s;
+  $('eqOn').checked = s.eqOn; $('eqAuto').checked = s.autoHeadroom;
+  $('fxLoud').checked = s.loudness; $('fxLim').checked = s.limiter; $('fxPure').checked = s.pure;
+  eqSliders.forEach((sl, i) => { sl.set(s.eq[i]); sl.showV(s.eq[i]); });
+  if (preampSlider) { preampSlider.set(s.preamp); preampSlider.showV(s.preamp); }
+  const setFx = (k, v) => { if (fx[k]) { fx[k].set(v); fx[k].out.textContent = fx[k].o.format(fx[k].value); } };
+  setFx('bass', s.bass); setFx('treble', s.treble); setFx('width', Math.round(s.width * 100));
+  setFx('revMix', Math.round(s.reverbMix * 100)); setFx('revSize', s.reverbSize);
+  setFx('volume', Math.round(s.volume * 100)); setFx('balance', Math.round(s.balance * 100));
+  const active = !s.pure && ((s.eqOn && s.eq.some(v => v)) || s.bass || s.treble || s.loudness || s.width !== 1 || s.reverbMix > 0 || s.preamp);
+  $('flagDsp').classList.toggle('on', !!active);
+  $('flagStereo').textContent = s.width === 0 && !s.pure ? 'Mono' : 'Estéreo';
+  $('soundSub').textContent = s.pure ? 'Modo puro' : !s.eqOn ? 'Ecualizador apagado' : (s.preset || 'Personalizado');
+  $('volSub').textContent = Math.round(s.volume * 100) + ' %';
+  $('volIcon').innerHTML = icon(s.volume === 0 ? 'mute' : 'volume');
+  drawCurve();
+}
+function afterDsp(commit) {
+  syncChipsOnly();
+  drawCurve();
+  if (commit) { syncDspUI(); renderPresets(); saveDsp(); }
+}
+function syncChipsOnly() {
+  const s = engine.s;
+  $('volSub').textContent = Math.round(s.volume * 100) + ' %';
+  $('soundSub').textContent = s.pure ? 'Modo puro' : !s.eqOn ? 'Ecualizador apagado' : (s.preset || 'Personalizado');
+}
+
+// Curva calculada con filtros espejo (no requiere tocar el audio real)
 let mirror = null;
-const curveFreqs = new Float32Array(160).map((_, i) => 20 * Math.pow(1000, i / 159));
+const curveFreqs = new Float32Array(200).map((_, i) => 20 * Math.pow(1000, i / 199));
 function getMirror() {
   if (mirror) return mirror;
   const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
@@ -205,105 +241,76 @@ function getMirror() {
 }
 function drawCurve() {
   const cv = $('eqCurve');
-  const w = cv.width = cv.clientWidth * devicePixelRatio || 300;
-  const h = cv.height = cv.clientHeight * devicePixelRatio || 44;
+  if (!cv.clientWidth) return;
+  const dpr = devicePixelRatio || 1;
+  const w = cv.width = Math.round(cv.clientWidth * dpr), h = cv.height = Math.round(cv.clientHeight * dpr);
   const g = cv.getContext('2d');
-  const cs = getComputedStyle(document.documentElement);
   g.clearRect(0, 0, w, h);
-  g.strokeStyle = cs.getPropertyValue('--lcd-dim');
-  g.lineWidth = 1;
-  g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
-  const m = getMirror();
-  if (!m) return;
+  const vfd = cssVar('--vfd');
+  g.strokeStyle = cssVar('--vfd-dim'); g.lineWidth = 1 * dpr;
+  for (const db of [-12, -6, 0, 6, 12]) { const y = h / 2 - db / 15 * (h / 2 - 6 * dpr); g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
+  const m = getMirror(); if (!m) return;
   const s = engine.s;
   m.eq.forEach((b, i) => { b.gain.value = s.eqOn && !s.pure ? s.eq[i] : 0; });
   m.bass.gain.value = s.pure ? 0 : s.bass; m.treble.gain.value = s.pure ? 0 : s.treble;
   const n = curveFreqs.length, mag = new Float32Array(n), ph = new Float32Array(n), tot = new Float32Array(n).fill(1);
   for (const f of [...m.eq, m.bass, m.treble]) { f.getFrequencyResponse(curveFreqs, mag, ph); for (let i = 0; i < n; i++) tot[i] *= mag[i]; }
   const pre = s.pure ? 0 : s.preamp + engine.headroomDb();
-  g.strokeStyle = cs.getPropertyValue('--lcd-fg');
-  g.lineWidth = 2 * devicePixelRatio;
-  g.shadowColor = cs.getPropertyValue('--lcd-fg'); g.shadowBlur = settings.theme === 'light' ? 0 : 4;
-  g.beginPath();
+  const pts = [];
   for (let i = 0; i < n; i++) {
     const db = 20 * Math.log10(tot[i]) + pre;
-    const x = i / (n - 1) * w;
-    const y = h / 2 - clamp(db / 18, -1, 1) * (h / 2 - 3);
-    i ? g.lineTo(x, y) : g.moveTo(x, y);
+    pts.push([i / (n - 1) * w, h / 2 - clamp(db / 15, -1, 1) * (h / 2 - 6 * dpr)]);
   }
-  g.stroke();
+  const grad = g.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, cssVar('--vfd-mid')); grad.addColorStop(1, 'transparent');
+  g.beginPath(); g.moveTo(0, h / 2); pts.forEach(([x, y]) => g.lineTo(x, y)); g.lineTo(w, h / 2); g.closePath();
+  g.globalAlpha = .35; g.fillStyle = grad; g.fill(); g.globalAlpha = 1;
+  g.beginPath(); pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y));
+  g.strokeStyle = vfd; g.lineWidth = 2 * dpr; g.shadowColor = cssVar('--vfd-glow'); g.shadowBlur = 6 * dpr; g.stroke(); g.shadowBlur = 0;
 }
 
-function syncDspUI() {
-  const s = engine.s;
-  $('eqOn').setAttribute('aria-pressed', String(s.eqOn));
-  $('eqAuto').setAttribute('aria-pressed', String(s.autoHeadroom));
-  $('dBass').value = s.bass; $('oBass').textContent = (s.bass > 0 ? '+' : '') + s.bass + ' dB';
-  $('dTreble').value = s.treble; $('oTreble').textContent = (s.treble > 0 ? '+' : '') + s.treble + ' dB';
-  $('dWidth').value = Math.round(s.width * 100); $('oWidth').textContent = Math.round(s.width * 100) + ' %';
-  $('dRevMix').value = Math.round(s.reverbMix * 100); $('oRevMix').textContent = Math.round(s.reverbMix * 100) + ' %';
-  $('dRevSize').value = s.reverbSize; $('oRevSize').textContent = (+s.reverbSize).toFixed(1) + ' s';
-  $('dLoud').setAttribute('aria-pressed', String(s.loudness));
-  $('dLim').setAttribute('aria-pressed', String(s.limiter));
-  $('dPure').setAttribute('aria-pressed', String(s.pure));
-  $('vol').value = Math.round(s.volume * 100);
-  $('bal').value = Math.round(s.balance * 100);
-  sliders.forEach(r => r());
-  const active = !s.pure && (s.eqOn && s.eq.some(v => v) || s.bass || s.treble || s.loudness || s.width !== 1 || s.reverbMix > 0 || s.preamp);
-  $('ledDsp').classList.toggle('on', !!active);
-  $('ledStereo').textContent = s.width === 0 && !s.pure ? 'MONO' : 'STEREO';
-  $('ledStereo').classList.toggle('on', !!player.cur);
-  drawCurve();
-}
-function afterDsp() { syncDspUI(); saveDsp(); }
-
-function wireDsp() {
-  $('eqOn').onclick = () => { engine.update({ eqOn: !engine.s.eqOn }); afterDsp(); };
-  $('eqAuto').onclick = () => { engine.update({ autoHeadroom: !engine.s.autoHeadroom }); afterDsp(); toast(engine.s.autoHeadroom ? 'AUTO: compensación de ganancia activa' : 'AUTO desactivado'); };
-  $('eqPresets').onclick = openPresets;
-  const bind = (id, fn) => $(id).addEventListener('input', e => { fn(+e.target.value); afterDsp(); });
-  bind('dBass', v => engine.update({ bass: v }));
-  bind('dTreble', v => engine.update({ treble: v }));
-  bind('dWidth', v => engine.update({ width: v / 100 }));
-  bind('dRevMix', v => engine.update({ reverbMix: v / 100 }));
-  bind('dRevSize', v => engine.update({ reverbSize: v }));
-  bind('vol', v => engine.update({ volume: v / 100 }));
-  bind('bal', v => engine.update({ balance: Math.abs(v) < 6 ? 0 : v / 100 }));
-  $('bal').addEventListener('dblclick', () => { engine.update({ balance: 0 }); afterDsp(); });
-  $('dLoud').onclick = () => { engine.update({ loudness: !engine.s.loudness }); afterDsp(); };
-  $('dLim').onclick = () => { engine.update({ limiter: !engine.s.limiter }); afterDsp(); };
-  $('dPure').onclick = () => { engine.update({ pure: !engine.s.pure }); afterDsp(); toast(engine.s.pure ? 'MODO PURO: salida sin procesar' : 'Procesamiento DSP activo'); };
-  $('dReset').onclick = () => {
+function wireSound() {
+  $('btnSound').onclick = () => { openSheet($('sheetSound')); requestAnimationFrame(() => { drawCurve(); }); };
+  $('btnVolume').onclick = () => openSheet($('sheetVolume'));
+  document.querySelectorAll('[data-sound]').forEach(b => b.onclick = () => {
+    document.querySelectorAll('[data-sound]').forEach(x => x.setAttribute('aria-selected', String(x === b)));
+    $('soundEq').hidden = b.dataset.sound !== 'eq'; $('soundFx').hidden = b.dataset.sound !== 'fx';
+    if (b.dataset.sound === 'eq') drawCurve();
+  });
+  $('eqOn').onchange = e => { engine.update({ eqOn: e.target.checked }); afterDsp(true); };
+  $('eqAuto').onchange = e => { engine.update({ autoHeadroom: e.target.checked }); afterDsp(true); };
+  $('fxLoud').onchange = e => { engine.update({ loudness: e.target.checked }); afterDsp(true); };
+  $('fxLim').onchange = e => { engine.update({ limiter: e.target.checked }); afterDsp(true); };
+  $('fxPure').onchange = e => { engine.update({ pure: e.target.checked }); afterDsp(true); };
+  $('fxReset').onclick = () => {
     const keep = { volume: engine.s.volume, eq: engine.s.eq, preamp: engine.s.preamp, eqOn: engine.s.eqOn, preset: engine.s.preset, autoHeadroom: engine.s.autoHeadroom };
-    engine.update({ ...structuredClone(DEFAULT_DSP), ...keep });
-    afterDsp();
+    engine.update({ ...structuredClone(DEFAULT_DSP), ...keep }); afterDsp(true); toast('Efectos restablecidos');
   };
-}
-
-function openPresets() {
-  openSheet('PRESETS', body => {
-    const all = { ...PRESETS, ...settings.customPresets };
-    for (const [name, vals] of Object.entries(all)) {
-      const custom = name in settings.customPresets;
-      sheetButton(body, (engine.s.preset === name ? '● ' : '') + name + (custom ? '  (tuyo)' : ''), () => {
-        engine.update({ eq: [...vals.slice(0, 10)], preamp: vals[10] ?? 0, preset: name });
-        afterDsp(); toast('Preset: ' + name);
-      });
-    }
-    sheetButton(body, '+ GUARDAR AJUSTE ACTUAL…', async () => {
-      const name = await askText('NOMBRE DEL PRESET', 'Mi preset');
+  $('presets').addEventListener('click', async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.hasAttribute('data-preset-add')) {
+      const name = await askText('Guardar ajuste del ecualizador', 'Nombre, por ejemplo Auto');
       if (!name) return;
       settings.customPresets[name] = [...engine.s.eq, engine.s.preamp];
-      engine.s.preset = name; saveSettings(); saveDsp(); toast('Preset guardado');
-    });
-    if (Object.keys(settings.customPresets).length) {
-      sheetButton(body, '− BORRAR UN PRESET TUYO…', () => {
-        openSheet('BORRAR PRESET', b2 => {
-          for (const n of Object.keys(settings.customPresets)) sheetButton(b2, n, () => { delete settings.customPresets[n]; saveSettings(); toast('Preset borrado'); }, 'danger');
-        });
-      });
+      engine.s.preset = name; saveSettings(); afterDsp(true); toast('Ajuste guardado: ' + name);
+      return;
     }
+    const name = b.dataset.preset;
+    const vals = PRESETS[name] || settings.customPresets[name];
+    if (!vals) return;
+    engine.update({ eq: [...vals.slice(0, 10)], preamp: vals[10] ?? 0, preset: name, eqOn: true });
+    afterDsp(true);
   });
+  // Mantener presionado un ajuste propio lo borra
+  let lp;
+  $('presets').addEventListener('pointerdown', e => {
+    const b = e.target.closest('[data-preset]'); if (!b || !(b.dataset.preset in settings.customPresets)) return;
+    lp = setTimeout(async () => {
+      buzz(20);
+      if (await confirmBox('Borrar ajuste', `Se borrará el ajuste "${b.dataset.preset}".`, 'Borrar')) { delete settings.customPresets[b.dataset.preset]; saveSettings(); renderPresets(); }
+    }, 650);
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => $('presets').addEventListener(ev, () => clearTimeout(lp)));
 }
 
 /* ================= Biblioteca y listas ================= */
@@ -313,60 +320,79 @@ async function loadLibrary() {
   all.forEach(t => tracks.set(t.id, t));
   playlists = (await Playlists.getAll()).sort((a, b) => a.created - b.created);
 }
-
-function libraryIds() {
+function libraryIds(sortKey = settings.libSort) {
   const arr = [...tracks.values()].filter(t => t.kind !== 'yt');
-  const by = settings.libSort;
   const cmp = {
     added: (a, b) => (b.addedAt || 0) - (a.addedAt || 0),
     title: (a, b) => (a.title || '').localeCompare(b.title || '', 'es'),
     artist: (a, b) => (a.artist || '').localeCompare(b.artist || '', 'es') || (a.title || '').localeCompare(b.title || '', 'es'),
     duration: (a, b) => (a.duration || 0) - (b.duration || 0),
-  }[by] || (() => 0);
+  }[sortKey] || (() => 0);
   return arr.sort(cmp).map(t => t.id);
 }
-function currentListIds(plId = player.plId) {
-  if (plId === LIB) return libraryIds();
-  const pl = playlists.find(p => p.id === plId);
-  return pl ? pl.trackIds.filter(id => tracks.has(id)) : [];
+const curPlaylist = () => view.tab === 'lists' && view.plId ? playlists.find(p => p.id === view.plId) : null;
+function currentIds() {
+  const pl = curPlaylist();
+  if (pl) return pl.trackIds.filter(id => tracks.has(id));
+  return libraryIds();
 }
 
-function renderPlSelect() {
-  const sel = $('plSelect');
-  const libCount = [...tracks.values()].filter(t => t.kind !== 'yt').length;
-  sel.innerHTML = `<option value="${LIB}">BIBLIOTECA (${libCount})</option>` +
-    playlists.map(p => `<option value="${esc(p.id)}">${esc(p.name)} (${p.trackIds.length})</option>`).join('');
-  if (player.plId !== LIB && !playlists.some(p => p.id === player.plId)) player.plId = LIB;
-  sel.value = player.plId;
+function setTab(tab) {
+  view.tab = tab; settings.tab = tab; saveSettings();
+  const idx = ['lib', 'lists', 'yt'].indexOf(tab);
+  document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+  $('tabInk').style.transform = `translateX(${idx * 100}%)`;
+  const showTracks = tab === 'lib' || (tab === 'lists' && view.plId);
+  $('paneTracks').hidden = !showTracks;
+  $('paneLists').hidden = !(tab === 'lists' && !view.plId);
+  $('paneYt').hidden = tab !== 'yt';
+  $('listHead').hidden = !(tab === 'lists' && view.plId);
+  if (showTracks) renderTracks(); else if (tab === 'lists') renderLists();
 }
 
-function renderList() {
-  const ul = $('playlist');
-  const q = $('plFilter').value.trim().toLowerCase();
-  const ids = currentListIds();
+function renderTracks() {
+  const ul = $('tracks');
+  const q = $('filter').value.trim().toLowerCase();
+  const ids = currentIds();
   viewIds = ids;
+  const pl = curPlaylist();
+  if (pl) $('listTitle').textContent = pl.name;
   const curId = player.cur?.id;
   let total = 0;
   const rows = [];
   ids.forEach((id, i) => {
-    const t = tracks.get(id);
-    if (!t) return;
+    const t = tracks.get(id); if (!t) return;
     total += t.duration || 0;
-    const label = (t.artist ? t.artist + ' - ' : '') + (t.title || t.name || id);
-    if (q && !label.toLowerCase().includes(q) && !(t.album || '').toLowerCase().includes(q)) return;
-    const tag = t.kind === 'yt' ? '<small>[YT]</small>' : t.kind === 'device' ? '' : (t.ytId ? '<small>[YT↓]</small>' : '');
-    rows.push(`<li data-id="${esc(id)}" class="${id === curId ? 'cur' : ''}${id === selectedId ? ' sel' : ''}"><span class="t">${i + 1}. ${esc(label)}${tag}</span><span class="d">${t.duration ? fmt(t.duration) : '--:--'}</span><button class="m" data-menu aria-label="Opciones">⋮</button></li>`);
+    const hay = `${t.title} ${t.artist} ${t.album}`.toLowerCase();
+    if (q && !hay.includes(q)) return;
+    const badge = t.kind === 'yt' ? '<span class="badge">YouTube</span>' : t.ytId ? '<span class="badge">Guardado</span>' : '';
+    const isCur = id === curId;
+    rows.push(`<li class="trk${isCur ? ' cur' : ''}" data-id="${esc(id)}">
+      <span class="n">${isCur ? '<span class="eqmini"><i></i><i></i><i></i></span>' : i + 1}</span>
+      <div class="meta"><div class="tt">${esc(t.title || t.name || id)}${badge}</div><div class="ar">${esc(t.artist || t.album || (t.kind === 'device' ? 'Teléfono' : 'Artista desconocido'))}</div></div>
+      <span class="d">${t.duration ? fmt(t.duration) : ''}</span>
+      <button class="m" data-menu aria-label="Opciones">${icon('more')}</button></li>`);
   });
   if (!rows.length) {
-    rows.push(`<li class="empty">${ids.length ? 'Sin coincidencias.' : player.plId === LIB
-      ? (NATIVE ? 'Biblioteca vacía. Toca ESCANEAR MÚSICA para leer los audios del teléfono o + ARCHIVOS para elegirlos.' : 'Biblioteca vacía. Toca + ARCHIVOS (o el botón ⏏) para agregar audios del dispositivo, o busca en YouTube.')
-      : 'Lista vacía. Agrega pistas desde la biblioteca (⋮ → Añadir a lista) o desde YouTube.'}</li>`);
+    rows.push(ids.length ? '<li class="empty">Nada coincide con la búsqueda.</li>' : pl
+      ? '<li class="empty"><b>Lista vacía</b>Agrega pistas desde la biblioteca con el botón de opciones de cada canción, o desde YouTube.</li>'
+      : `<li class="empty"><b>Tu biblioteca está vacía</b>${NATIVE ? 'Escanea la música del teléfono o elige archivos sueltos.' : 'Elige audios del dispositivo o busca en la pestaña YouTube.'}<br>
+        ${NATIVE ? '<button class="btn accent" data-empty="scan">' + icon('scan') + 'Escanear música</button> ' : ''}<button class="btn" data-empty="add">${icon('plus')}Elegir archivos</button></li>`);
   }
   ul.innerHTML = rows.join('');
-  $('plTotal').textContent = `${ids.length} pistas · ${fmt(total)}`;
+  ul.classList.toggle('paused', audio.paused);
+  $('count').textContent = ids.length ? `${ids.length} ${ids.length === 1 ? 'pista' : 'pistas'} · ${fmt(total)}` : '';
 }
 
-function refreshLists() { renderPlSelect(); renderList(); }
+function renderLists() {
+  const ul = $('lists');
+  if (!playlists.length) { ul.innerHTML = '<li class="empty" style="display:block"><b>Sin listas todavía</b>Crea una lista y agrega canciones desde la biblioteca o desde YouTube.</li>'; return; }
+  ul.innerHTML = playlists.map(p => {
+    const dur = p.trackIds.reduce((a, id) => a + (tracks.get(id)?.duration || 0), 0);
+    return `<li data-pl="${esc(p.id)}"><span class="cover">${icon('playlist')}</span><div><div class="tt">${esc(p.name)}</div><div class="ar">${p.trackIds.length} pistas · ${fmt(dur)}</div></div><span></span><button class="m ibtn" data-plmenu aria-label="Opciones">${icon('more')}</button></li>`;
+  }).join('');
+}
+function refreshLists() { if (view.tab === 'lists' && !view.plId) renderLists(); else if (view.tab !== 'yt') renderTracks(); }
 
 async function addFiles(fileList) {
   const files = [...fileList];
@@ -375,167 +401,125 @@ async function addFiles(fileList) {
   let i = 0;
   for (const f of files) {
     i++;
-    toast(`Importando ${i}/${files.length}: ${f.name}`, 8000);
+    toast(`Importando ${i} de ${files.length}: ${f.name}`, 8000);
     try {
       const id = 'loc:' + uid();
       const ext = extOf(f.name);
       const tags = await readTags(f, f.name);
       let duration = 0;
-      if (!RARE_EXT.includes(ext)) {
-        const u = URL.createObjectURL(f);
-        duration = await probeDuration(u);
-        URL.revokeObjectURL(u);
-      }
-      const t = {
-        id, kind: 'local', name: f.name, ext, title: tags.title, artist: tags.artist, album: tags.album,
-        duration, size: f.size, mime: f.type || MIME[ext] || 'application/octet-stream', sampleRate: tags.sampleRate || 0,
-        addedAt: Date.now() + i, hasCover: !!tags.cover,
-      };
+      if (!RARE_EXT.includes(ext)) { const u = URL.createObjectURL(f); duration = await probeDuration(u); URL.revokeObjectURL(u); }
+      const t = { id, kind: 'local', name: f.name, ext, title: tags.title, artist: tags.artist, album: tags.album, duration, size: f.size,
+        mime: f.type || MIME[ext] || 'application/octet-stream', sampleRate: tags.sampleRate || 0, addedAt: Date.now() + i, hasCover: !!tags.cover };
       await Blobs.put({ id, blob: f, cover: tags.cover || null });
       await Tracks.put(t);
-      tracks.set(id, t);
-      added.push(id);
-    } catch (e) {
-      console.warn(e);
-      toast('No se pudo importar ' + f.name);
-    }
+      tracks.set(id, t); added.push(id);
+    } catch (e) { console.warn(e); toast('No se pudo importar ' + f.name); }
   }
-  const pl = playlists.find(p => p.id === player.plId);
+  const pl = curPlaylist();
   if (pl) { pl.trackIds.push(...added); await Playlists.put(pl); }
   refreshLists();
-  toast(`${added.length} audio(s) agregados`);
+  toast(`${added.length} ${added.length === 1 ? 'audio agregado' : 'audios agregados'}`);
   requestPersist();
 }
 
 async function scanDevice() {
   if (!Native) return;
-  toast('Escaneando música del teléfono…', 10000);
+  toast('Leyendo la música del teléfono…', 10000);
   try {
     const r = await Native.scan();
     const list = r.tracks || [];
-    const seen = new Set();
-    const now = Date.now();
+    const seen = new Set(); const now = Date.now();
     const batch = list.map((x, i) => {
-      const id = 'dev:' + x.id;
-      seen.add(id);
+      const id = 'dev:' + x.id; seen.add(id);
       const prev = tracks.get(id);
-      const t = {
-        id, kind: 'device', uri: x.uri, name: x.name || '', ext: extOf(x.name), title: x.title || x.name,
+      const t = { id, kind: 'device', uri: x.uri, name: x.name || '', ext: extOf(x.name), title: x.title || x.name,
         artist: x.artist && x.artist !== '<unknown>' ? x.artist : '', album: x.album || '', duration: (x.duration || 0) / 1000,
-        size: x.size || 0, mime: x.mime || '', addedAt: prev?.addedAt || (x.dateAdded ? x.dateAdded * 1000 : now - i), hasCover: false,
-      };
-      tracks.set(id, t);
-      return t;
+        size: x.size || 0, mime: x.mime || '', addedAt: prev?.addedAt || (x.dateAdded ? x.dateAdded * 1000 : now - i), hasCover: false, converted: prev?.converted };
+      tracks.set(id, t); return t;
     });
     await Tracks.putMany(batch);
-    for (const t of [...tracks.values()]) {
-      if (t.kind === 'device' && !seen.has(t.id)) { tracks.delete(t.id); await Tracks.del(t.id); }
-    }
+    for (const t of [...tracks.values()]) if (t.kind === 'device' && !seen.has(t.id)) { tracks.delete(t.id); await Tracks.del(t.id); }
     refreshLists();
-    toast(`${batch.length} audios encontrados en el teléfono`);
-  } catch (e) {
-    toast('Escaneo cancelado: ' + (e.message || e));
-  }
+    toast(`${batch.length} canciones encontradas en el teléfono`);
+  } catch (e) { toast('No se pudo leer la música: ' + (e.message || e), 4500); }
 }
 
-async function addToPlaylistSheet(ids) {
-  openSheet('AÑADIR A LISTA', body => {
-    for (const p of playlists) sheetButton(body, `${p.name} (${p.trackIds.length})`, async () => {
-      p.trackIds.push(...ids); await Playlists.put(p); refreshLists(); toast(`Añadido a ${p.name}`);
-    });
-    sheetButton(body, '+ NUEVA LISTA…', async () => {
-      const name = await askText('NUEVA LISTA', 'Nombre de la lista');
+function addToPlaylist(ids) {
+  menu('Agregar a una lista', [
+    ...playlists.map(p => ({ icon: 'playlist', label: `${p.name} (${p.trackIds.length})`, action: async () => { p.trackIds.push(...ids); await Playlists.put(p); refreshLists(); toast('Agregado a ' + p.name); } })),
+    { icon: 'plus', label: 'Nueva lista…', action: async () => {
+      const name = await askText('Nueva lista', 'Nombre de la lista', '', 'Crear');
       if (!name) return;
       const p = { id: 'pl:' + uid(), name, trackIds: [...ids], created: Date.now() };
       playlists.push(p); await Playlists.put(p); refreshLists(); toast(`Lista "${name}" creada`);
-    });
-  });
+    } },
+  ]);
 }
 
 function trackMenu(id) {
-  const t = tracks.get(id);
-  if (!t) return;
-  openSheet((t.title || 'PISTA').slice(0, 40).toUpperCase(), body => {
-    sheetButton(body, '▶ REPRODUCIR', () => playFromView(id));
-    sheetButton(body, '+ AÑADIR A LISTA…', () => addToPlaylistSheet([id]));
-    if (t.kind === 'yt') sheetButton(body, '⬇ GUARDAR EN BIBLIOTECA (SIN CONEXIÓN)', () => downloadYouTube({ id: t.ytId, title: t.title, author: t.artist, duration: t.duration, thumb: t.thumb }));
-    const pl = playlists.find(p => p.id === player.plId);
-    if (pl) sheetButton(body, '− QUITAR DE ESTA LISTA', async () => {
-      const k = pl.trackIds.indexOf(id); if (k >= 0) pl.trackIds.splice(k, 1);
-      await Playlists.put(pl); refreshLists();
-    });
-    sheetButton(body, 'ⓘ INFORMACIÓN', () => showInfo(t));
-    if (t.kind !== 'yt') sheetButton(body, '✕ QUITAR DE BIBLIOTECA', async () => {
-      const ok = await confirmSheet('QUITAR', t.kind === 'device'
-        ? 'Se quitará de la biblioteca de RetroAmp. El archivo del teléfono no se borra.'
-        : 'Se borrará la copia guardada en RetroAmp. Esta acción no se puede deshacer.');
+  const t = tracks.get(id); if (!t) return;
+  const pl = curPlaylist();
+  menu(t.title || 'Pista', [
+    { icon: 'play', label: 'Reproducir', action: () => playFromView(id) },
+    { icon: 'listadd', label: 'Agregar a una lista', action: () => addToPlaylist([id]) },
+    t.kind === 'yt' ? { icon: 'download', label: 'Guardar para escuchar sin conexión', action: () => downloadYouTube({ id: t.ytId, title: t.title, author: t.artist, duration: t.duration, thumb: t.thumb }) } : null,
+    pl ? { icon: 'close', label: 'Quitar de esta lista', action: async () => { const k = pl.trackIds.indexOf(id); if (k >= 0) pl.trackIds.splice(k, 1); await Playlists.put(pl); refreshLists(); } } : null,
+    { icon: 'info', label: 'Información', action: () => showInfo(t) },
+    t.kind !== 'yt' ? { icon: 'trash', label: 'Quitar de la biblioteca', danger: true, action: async () => {
+      const ok = await confirmBox('Quitar de la biblioteca', t.kind === 'device'
+        ? 'RetroAmp deja de mostrarla. El archivo sigue en tu teléfono.'
+        : 'Se borra la copia guardada en RetroAmp. No se puede deshacer.', 'Quitar');
       if (!ok) return;
-      await Tracks.del(id); await Blobs.del(id); await Blobs.del('conv:' + id).catch(() => {});
+      await Tracks.del(id); await Blobs.del(id); await Blobs.del('conv:' + id);
       tracks.delete(id);
-      for (const p of playlists) { const before = p.trackIds.length; p.trackIds = p.trackIds.filter(x => x !== id); if (p.trackIds.length !== before) await Playlists.put(p); }
+      for (const p of playlists) { const n = p.trackIds.length; p.trackIds = p.trackIds.filter(x => x !== id); if (p.trackIds.length !== n) await Playlists.put(p); }
       refreshLists();
-    }, 'danger');
-  });
+    } } : null,
+  ]);
 }
 
 function showInfo(t) {
-  openSheet('INFORMACIÓN', body => {
-    const rows = [
-      ['Título', t.title], ['Artista', t.artist], ['Álbum', t.album], ['Archivo', t.name],
-      ['Origen', t.kind === 'yt' ? 'YouTube (streaming)' : t.kind === 'device' ? 'Teléfono' : t.ytId ? 'YouTube (guardado)' : 'Importado'],
-      ['Formato', (t.converted ? 'FLAC (convertido desde ' + (t.ext || '?').toUpperCase() + ')' : (t.ext || t.mime || '').toUpperCase())],
-      ['Duración', t.duration ? fmt(t.duration) : '—'], ['Tamaño', t.size ? (t.size / 1048576).toFixed(2) + ' MB' : '—'],
-      ['Bitrate aprox.', t.size && t.duration ? Math.round(t.size * 8 / t.duration / 1000) + ' kbps' : '—'],
-    ].filter(r => r[1]);
-    const pre = document.createElement('pre'); pre.className = 'test-out';
-    pre.textContent = rows.map(r => `${r[0].padEnd(15)} ${r[1]}`).join('\n');
-    body.appendChild(pre);
-  });
+  $('menuTitle').textContent = 'Información';
+  const rows = [
+    ['Título', t.title], ['Artista', t.artist], ['Álbum', t.album], ['Archivo', t.name],
+    ['Origen', t.kind === 'yt' ? 'YouTube en línea' : t.kind === 'device' ? 'Teléfono' : t.ytId ? 'YouTube guardado' : 'Importado'],
+    ['Formato', t.converted ? 'FLAC convertido desde ' + (t.ext || '?').toUpperCase() : (t.ext || t.mime || '').toUpperCase()],
+    ['Duración', t.duration ? fmt(t.duration) : ''], ['Tamaño', t.size ? (t.size / 1048576).toFixed(2) + ' MB' : ''],
+    ['Bitrate', t.size && t.duration ? Math.round(t.size * 8 / t.duration / 1000) + ' kbps' : ''],
+  ].filter(r => r[1]);
+  $('menuBody').innerHTML = `<pre class="log">${rows.map(r => `${r[0].padEnd(10)} ${esc(r[1])}`).join('\n')}</pre>`;
+  openSheet($('sheetMenu'));
 }
 
-function plMenu() {
-  const pl = playlists.find(p => p.id === player.plId);
-  openSheet('LISTAS', body => {
-    sheetButton(body, '+ NUEVA LISTA…', async () => {
-      const name = await askText('NUEVA LISTA', 'Nombre de la lista');
-      if (!name) return;
-      const p = { id: 'pl:' + uid(), name, trackIds: [], created: Date.now() };
-      playlists.push(p); await Playlists.put(p); player.plId = p.id; refreshLists();
-    });
-    if (pl) {
-      sheetButton(body, '✎ RENOMBRAR LISTA…', async () => {
-        const name = await askText('RENOMBRAR', 'Nombre', pl.name);
-        if (!name) return; pl.name = name; await Playlists.put(pl); refreshLists();
-      });
-      sheetButton(body, '⧉ QUITAR DUPLICADOS', async () => {
-        pl.trackIds = [...new Set(pl.trackIds)]; await Playlists.put(pl); refreshLists();
-      });
-      sheetButton(body, '✕ ELIMINAR LISTA', async () => {
-        if (!(await confirmSheet('ELIMINAR LISTA', `Se eliminará la lista "${pl.name}". Las pistas siguen en la biblioteca.`))) return;
-        await Playlists.del(pl.id); playlists = playlists.filter(p => p !== pl); player.plId = LIB; refreshLists();
-      }, 'danger');
-    } else {
-      sheetButton(body, '+ AÑADIR TODA LA BIBLIOTECA A UNA LISTA…', () => addToPlaylistSheet(libraryIds()));
-    }
-  });
+function listMenu(pl) {
+  menu(pl.name, [
+    { icon: 'play', label: 'Reproducir la lista', action: () => { view.plId = pl.id; setTab('lists'); if (viewIds.length) playFromView(viewIds[0]); } },
+    { icon: 'edit', label: 'Cambiar nombre', action: async () => { const n = await askText('Cambiar nombre', 'Nombre', pl.name); if (!n) return; pl.name = n; await Playlists.put(pl); refreshLists(); } },
+    { icon: 'sort', label: 'Invertir orden', action: async () => { pl.trackIds.reverse(); await Playlists.put(pl); refreshLists(); } },
+    { icon: 'check', label: 'Quitar duplicados', action: async () => { pl.trackIds = [...new Set(pl.trackIds)]; await Playlists.put(pl); refreshLists(); } },
+    { icon: 'trash', label: 'Eliminar la lista', danger: true, action: async () => {
+      if (!(await confirmBox('Eliminar lista', `Se elimina "${pl.name}". Las canciones siguen en la biblioteca.`, 'Eliminar'))) return;
+      await Playlists.del(pl.id); playlists = playlists.filter(p => p !== pl);
+      if (view.plId === pl.id) view.plId = null;
+      setTab('lists');
+    } },
+  ]);
 }
 
 function sortMenu() {
-  const pl = playlists.find(p => p.id === player.plId);
-  const opts = [['added', 'FECHA DE INGRESO'], ['title', 'TÍTULO'], ['artist', 'ARTISTA'], ['duration', 'DURACIÓN']];
-  openSheet('ORDENAR', body => {
-    for (const [k, label] of opts) sheetButton(body, (settings.libSort === k && !pl ? '● ' : '') + label, async () => {
+  const pl = curPlaylist();
+  const opts = [['added', 'Agregadas recientemente'], ['title', 'Título'], ['artist', 'Artista'], ['duration', 'Duración']];
+  menu('Ordenar por', opts.map(([k, label]) => ({
+    icon: 'sort', label, sel: !pl && settings.libSort === k,
+    action: async () => {
       if (pl) {
-        const tmp = settings.libSort; settings.libSort = k;
-        const order = libraryIds(); settings.libSort = tmp;
-        const rank = new Map(order.map((id, i) => [id, i]));
+        const rank = new Map(libraryIds(k).map((id, i) => [id, i]));
         pl.trackIds.sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9));
         await Playlists.put(pl);
       } else { settings.libSort = k; saveSettings(); }
-      renderList();
-    });
-    if (pl) sheetButton(body, '⇅ INVERTIR ORDEN', async () => { pl.trackIds.reverse(); await Playlists.put(pl); renderList(); });
-  });
+      renderTracks();
+    },
+  })));
 }
 
 /* ================= Reproducción ================= */
@@ -549,20 +533,18 @@ function buildOrder(startIdx) {
     player.pos = startIdx >= 0 ? 0 : -1;
   } else player.pos = startIdx;
 }
-
 function playFromView(id) {
   engine.init(); engine.resume();
   player.list = [...viewIds];
-  const idx = player.list.indexOf(id);
-  buildOrder(idx);
+  buildOrder(player.list.indexOf(id));
   playTrack(id);
 }
 
 function loadSrc(url, timeout = 20000) {
   return new Promise((resolve, reject) => {
     const ok = () => { done(); resolve(); };
-    const bad = () => { const err = audio.error; done(); reject(new Error(err ? `media error ${err.code}` : 'error')); };
-    const to = setTimeout(() => { done(); reject(new Error('tiempo de espera agotado')); }, timeout);
+    const bad = () => { const err = audio.error; done(); reject(new Error(err ? `código ${err.code}` : 'error')); };
+    const to = setTimeout(() => { done(); reject(new Error('sin respuesta')); }, timeout);
     function done() { clearTimeout(to); audio.removeEventListener('canplay', ok); audio.removeEventListener('loadedmetadata', ok); audio.removeEventListener('error', bad); }
     audio.addEventListener('canplay', ok);
     audio.addEventListener('loadedmetadata', ok);
@@ -571,62 +553,51 @@ function loadSrc(url, timeout = 20000) {
     audio.load();
   });
 }
-
 function setObjUrl(blob) {
   if (player.objUrl) URL.revokeObjectURL(player.objUrl);
   player.objUrl = URL.createObjectURL(blob);
   return player.objUrl;
 }
-
 async function blobFor(t) {
-  if (t.kind === 'local') { const r = await Blobs.get(t.id); if (!r) throw new Error('Archivo no encontrado en la biblioteca'); return r.blob; }
+  if (t.kind === 'local') { const r = await Blobs.get(t.id); if (!r) throw new Error('el archivo ya no está en la biblioteca'); return r.blob; }
   if (t.kind === 'device') {
     const conv = await Blobs.get('conv:' + t.id);
     if (conv) return conv.blob;
     const res = await fetch(Cap.convertFileSrc(t.uri));
-    if (!res.ok) throw new Error('No se pudo leer el archivo del teléfono');
+    if (!res.ok) throw new Error('no se pudo leer el archivo del teléfono');
     const b = await res.blob();
     return b.type ? b : new Blob([b], { type: t.mime || MIME[t.ext] || '' });
   }
-  throw new Error('Origen no soportado');
+  throw new Error('origen no soportado');
 }
-
 async function convertAndStore(t, blob) {
-  const out = await transcode(blob, t.name || ('audio.' + (t.ext || 'bin')), (msg) => setMarqueeText(msg.toUpperCase() + ' ***'));
+  const out = await transcode(blob, t.name || ('audio.' + (t.ext || 'bin')), msg => setMarquee(msg));
   if (t.kind === 'local') {
     const prev = await Blobs.get(t.id);
     await Blobs.put({ id: t.id, blob: out, cover: prev?.cover || null });
     t.converted = true; t.size = out.size; t.mime = 'audio/flac';
-  } else {
-    await Blobs.put({ id: 'conv:' + t.id, blob: out });
-    t.converted = true;
-  }
+  } else { await Blobs.put({ id: 'conv:' + t.id, blob: out }); t.converted = true; }
   await Tracks.put(t);
   return out;
 }
 
 async function playTrack(id, { autoplay = true, startAt = 0 } = {}) {
-  const t = tracks.get(id);
-  if (!t) return;
+  const t = tracks.get(id); if (!t) return;
   const token = ++player.token;
   player.cur = t; player.kbps = 0; player.loading = true;
-  selectedId = null;
-  updateDisplay(); renderList(); scrollToCurrent();
-  setMarqueeText('CARGANDO… ***');
+  updateDisplay(); renderIfTracks(); scrollToCurrent();
+  setMarquee('Cargando…');
   try {
-    if (t.kind === 'yt') {
-      await playYouTubeStream(t, token);
-    } else {
+    if (t.kind === 'yt') await playYouTubeStream(t, token);
+    else {
       let blob = await blobFor(t);
       if (token !== player.token) return;
-      const rare = RARE_EXT.includes(t.ext) && !t.converted;
-      if (rare) blob = await convertAndStore(t, blob);
+      if (RARE_EXT.includes(t.ext) && !t.converted) blob = await convertAndStore(t, blob);
       if (token !== player.token) return;
-      try {
-        await loadSrc(setObjUrl(blob));
-      } catch (e) {
+      try { await loadSrc(setObjUrl(blob)); }
+      catch (e) {
         if (t.converted) throw e;
-        toast('Formato no nativo: usando el decodificador universal…', 4000);
+        toast('Formato no nativo: convirtiendo con el decodificador universal…', 4000);
         blob = await convertAndStore(t, blob);
         if (token !== player.token) return;
         await loadSrc(setObjUrl(blob));
@@ -643,51 +614,67 @@ async function playTrack(id, { autoplay = true, startAt = 0 } = {}) {
     if (token !== player.token) return;
     player.loading = false;
     console.warn(e);
-    toast('Error: ' + (e.message || e), 4500);
-    setMarqueeText('ERROR AL CARGAR · ' + (t.title || '') + ' ***');
+    toast(e.message || String(e), 6000);
+    setMarquee('No se pudo cargar: ' + (t.title || ''));
     updateDisplay();
   }
 }
 
+async function* ytCandidates(id) {
+  const preferOpus = settings.ytFormat !== 'm4a';
+  if (ytn) yield* ytn.candidates(id, preferOpus);
+  yield* yt.candidates(id);
+}
+
 async function playYouTubeStream(t, token) {
-  let ok = false;
   const tried = [];
-  for await (const c of yt.candidates(t.ytId)) {
+  for await (const c of ytCandidates(t.ytId)) {
     if (token !== player.token) return;
-    $('ytStatus').textContent = 'Conectando: ' + host(c.source);
-    setMarqueeText('CONECTANDO CON ' + host(c.source).toUpperCase() + '… ***');
+    const label = c.kind === 'native' ? c.source : host(c.source);
+    setMarquee('Conectando con ' + label + '…');
     try {
-      await loadSrc(c.url, c.kind === 'server' ? 30000 : 15000);
-      yt.markGood(c);
+      try { await loadSrc(c.url, c.kind === 'server' ? 30000 : 20000); }
+      catch (e) {
+        if (c.kind !== 'native') throw e;
+        // Plan B nativo: descarga completa por el proxy y reproduce desde memoria
+        setMarquee('Descargando audio…');
+        const r = await fetch(c.url);
+        if (!r.ok) throw new Error('proxy HTTP ' + r.status);
+        const b = await r.blob();
+        if (b.size < 20000) throw new Error('respuesta vacía');
+        if (token !== player.token) return;
+        await loadSrc(setObjUrl(b), 15000);
+      }
+      if (c.kind === 'native') ytn.markGood(c); else yt.markGood(c);
       player.kbps = c.kbps || 0;
       if (c.meta) {
         if (c.meta.title && (!t.title || t.title.startsWith('Video '))) t.title = c.meta.title;
-        if (c.meta.author && !t.artist) t.artist = c.meta.author;
+        if (c.meta.author && (!t.artist || t.artist === 'Enlace pegado')) t.artist = c.meta.author;
         if (c.meta.duration && !t.duration) t.duration = c.meta.duration;
         if (tracks.has(t.id)) Tracks.put(t);
       }
-      $('ytStatus').textContent = 'Fuente: ' + host(c.source) + (c.kbps ? ` · ${c.kbps} kbps` : '');
-      ok = true; break;
-    } catch (e) { tried.push(host(c.source)); }
+      $('ytStatus').textContent = 'Sonando desde ' + label + (c.kbps ? ` · ${c.kbps} kbps` : '');
+      if (!t.duration && isFinite(audio.duration)) t.duration = audio.duration;
+      return;
+    } catch (e) { tried.push(`${label}: ${e.message || e}`); }
   }
-  if (!ok) {
-    $('ytStatus').textContent = 'Sin respuesta de: ' + (tried.join(', ') || 'ninguna fuente configurada');
-    throw new Error('No se pudo obtener el audio. Revisa tu servidor o actualiza las instancias en Ajustes.');
-  }
-  if (!t.duration && isFinite(audio.duration)) t.duration = audio.duration;
+  const nativeErr = ytn ? ytn.lastErrors : [];
+  const detail = [...nativeErr, ...tried].slice(0, 4).join(' · ');
+  $('ytStatus').textContent = detail ? 'Falló: ' + detail : 'No hay fuentes de YouTube configuradas';
+  throw new Error(NATIVE
+    ? 'YouTube no entregó el audio. Toca Ajustes, Probar YouTube directo, para ver el motivo.'
+    : 'Para YouTube en la versión web necesitas tu servidor yt-dlp (Ajustes, YouTube).');
 }
 
 async function doPlay() {
-  engine.init();
-  await engine.resume();
-  try { await audio.play(); } catch (e) { toast('Toca ▶ para reproducir'); }
+  engine.init(); await engine.resume();
+  try { await audio.play(); } catch { toast('Toca reproducir para empezar'); }
 }
-
 function nextIndex(dir) {
   const n = player.order.length;
   if (!n) return -1;
   let p = player.pos + dir;
-  if (p >= n) { if (player.repeat === 1) { if (player.shuffle) { buildOrder(-1); p = 0; } else p = 0; } else return -1; }
+  if (p >= n) { if (player.repeat === 1) { if (player.shuffle) buildOrder(-1); p = 0; } else return -1; }
   if (p < 0) p = player.repeat === 1 ? n - 1 : 0;
   return p;
 }
@@ -699,10 +686,12 @@ function go(dir) {
   player.pos = p;
   playTrack(player.list[player.order[p]]);
 }
-function stop() {
-  audio.pause();
-  try { audio.currentTime = 0; } catch {}
-  updateDisplay();
+function stop() { audio.pause(); try { audio.currentTime = 0; } catch {} updateDisplay(); }
+function togglePlay() {
+  engine.init(); engine.resume();
+  if (player.cur && audio.src) { if (audio.paused) doPlay(); else audio.pause(); }
+  else if (viewIds.length) playFromView(viewIds[0]);
+  else toast('Agrega audios o busca en YouTube');
 }
 
 audio.addEventListener('ended', () => {
@@ -712,169 +701,186 @@ audio.addEventListener('ended', () => {
   player.pos = p;
   playTrack(player.list[player.order[p]]);
 });
-audio.addEventListener('play', () => { updateDisplay(); nativeService(true); startViz(); });
-audio.addEventListener('pause', () => { updateDisplay(); if (!player.loading) nativeService(false); });
+audio.addEventListener('play', () => { updateDisplay(); nativeService(true); startViz(); $('tracks').classList.remove('paused'); });
+audio.addEventListener('pause', () => { updateDisplay(); if (!player.loading) nativeService(false); $('tracks').classList.add('paused'); });
 audio.addEventListener('timeupdate', () => { updateTime(); saveSessionSoon(); });
-audio.addEventListener('durationchange', updateTime);
+audio.addEventListener('durationchange', () => updateTime(true));
 
-// El servicio se detiene con retraso: entre canciones Android no permite reiniciarlo desde segundo plano
 let svcStopT = null;
 function nativeService(on) {
   if (!Native) return;
   clearTimeout(svcStopT);
-  if (!on) {
-    svcStopT = setTimeout(() => { if (audio.paused && !player.loading) nativeService.raw(false); }, 60000);
-    return;
-  }
-  nativeService.raw(true);
+  if (!on) { svcStopT = setTimeout(() => { if (audio.paused && !player.loading) callService(false); }, 60000); return; }
+  callService(true);
 }
-nativeService.raw = on => {
+function callService(on) {
   try {
-    const p = on
-      ? Native.startService({ title: player.cur ? ((player.cur.artist ? player.cur.artist + ' - ' : '') + player.cur.title) : 'RetroAmp' })
-      : Native.stopService();
+    const p = on ? Native.startService({ title: player.cur ? ((player.cur.artist ? player.cur.artist + ' · ' : '') + player.cur.title) : 'RetroAmp' }) : Native.stopService();
     p && p.catch && p.catch(() => {});
   } catch {}
 }
 
 /* ================= Display ================= */
-let marqueeKey = '';
-function setMarqueeText(txt) {
-  if (txt === marqueeKey) return;
-  marqueeKey = txt;
+let marqueeText = '';
+function setMarquee(txt) {
+  if (txt === marqueeText) return;
+  marqueeText = txt;
+  const box = document.querySelector('.vfd-title');
   const m = $('marquee');
   m.textContent = txt;
-  m.style.animationDuration = Math.max(8, txt.length * 0.22) + 's';
+  box.classList.remove('scroll');
+  requestAnimationFrame(() => {
+    if (m.scrollWidth > box.clientWidth - 20) {
+      m.textContent = txt + '     ·     ' + txt;
+      box.style.setProperty('--marq', Math.max(10, txt.length * 0.32) + 's');
+      box.classList.add('scroll');
+    }
+  });
 }
-
 function updateDisplay() {
   const t = player.cur;
   const playing = !audio.paused && !audio.ended;
-  $('dispState').textContent = player.loading ? '…' : playing ? '▶' : (audio.currentTime > 0 ? 'Ⅱ' : '■');
-  if (t && !player.loading) {
-    const n = player.list.indexOf(t.id) + 1;
-    setMarqueeText(`${n > 0 ? n + '. ' : ''}${t.artist ? t.artist + ' - ' : ''}${t.title || t.name} (${fmt(t.duration || audio.duration)})  ***  `);
-  }
-  $('dispKbps').textContent = player.kbps ? String(player.kbps).padStart(3, ' ') : '---';
+  $('vfdState').innerHTML = player.loading ? '' : icon(playing ? 'play' : 'pause');
+  $('vfdState').style.opacity = t ? 1 : 0;
+  $('btnPlay').querySelector('.ic-play').innerHTML = icon(playing ? 'pause' : 'play');
+  $('btnPlay').setAttribute('aria-label', playing ? 'Pausar' : 'Reproducir');
+  if (t && !player.loading) setMarquee(`${t.artist ? t.artist + ' · ' : ''}${t.title || t.name}`);
+  $('vfdKbps').textContent = player.kbps ? `${player.kbps} kbps` : '--- kbps';
   const khz = t?.sampleRate || engine.sampleRate || 0;
-  $('dispKhz').textContent = khz ? Math.round(khz / 1000) : '--';
-  $('ledSrc').textContent = !t ? 'LOCAL' : t.kind === 'yt' ? 'YOUTUBE' : t.kind === 'device' ? 'TELÉFONO' : t.ytId ? 'YT·GUARDADO' : 'LOCAL';
-  $('ledSrc').classList.toggle('on', !!t);
-  $('ledStereo').classList.toggle('on', !!t);
+  $('vfdKhz').textContent = khz ? `${(khz / 1000).toFixed(khz % 1000 ? 1 : 0)} kHz` : '-- kHz';
+  $('flagSrc').textContent = !t ? 'Local' : t.kind === 'yt' ? 'YouTube' : t.kind === 'device' ? 'Teléfono' : t.ytId ? 'YouTube' : 'Local';
+  $('flagSrc').classList.toggle('on', !!t);
+  $('flagStereo').classList.toggle('on', !!t);
   $('btnShuffle').setAttribute('aria-pressed', String(player.shuffle));
   $('btnRepeat').setAttribute('aria-pressed', String(player.repeat > 0));
-  $('btnRepeat').textContent = player.repeat === 2 ? 'REPETIR 1' : 'REPETIR';
-  updateTime();
+  $('btnRepeat').querySelector('.ic-rep').innerHTML = icon(player.repeat === 2 ? 'repeat1' : 'repeat');
+  $('btnRepeat').setAttribute('aria-label', ['Repetir: no', 'Repetir: todo', 'Repetir: una'][player.repeat]);
+  updateTime(true);
 }
 
-let seeking = false;
-function updateTime() {
+let lastTimeText = '';
+let seekSlider;
+function updateTime(force = false) {
   const d = audio.duration, c = audio.currentTime;
-  const el = $('dispTime');
-  const shown = settings.remain && isFinite(d) ? d - c : c;
-  const s = Math.floor(Math.max(0, shown));
-  const mm = Math.floor(s / 60), ss = s % 60;
-  el.textContent = `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
-  el.classList.toggle('remain', settings.remain && isFinite(d));
-  if (!seeking) $('seek').value = isFinite(d) && d > 0 ? Math.round(c / d * 1000) : 0;
+  const dragging = seekSlider && seekSlider.el.classList.contains('dragging');
+  const shown = dragging && isFinite(d) ? seekSlider.value / 1000 * d : c;
+  const remain = settings.remain && isFinite(d);
+  const v = Math.max(0, Math.floor(remain ? d - shown : shown));
+  const mm = Math.min(99, Math.floor(v / 60)), ss = v % 60;
+  const txt = (remain ? '-' : '') + String(mm).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
+  if (force || txt !== lastTimeText) {
+    lastTimeText = txt;
+    drawSevenSeg($('vfdTime'), txt, { on: cssVar('--vfd'), off: cssVar('--vfd-dim'), glow: cssVar('--vfd-glow'), blur: parseFloat(cssVar('--glow')) || 0 });
+  }
+  $('tCur').textContent = fmt(shown);
+  $('tDur').textContent = isFinite(d) ? fmt(d) : (player.cur?.duration ? fmt(player.cur.duration) : '0:00');
+  if (seekSlider && !dragging) seekSlider.set(isFinite(d) && d > 0 ? c / d * 1000 : 0);
   if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && isFinite(d) && d > 0) {
     try { navigator.mediaSession.setPositionState({ duration: d, position: Math.min(c, d), playbackRate: audio.playbackRate }); } catch {}
   }
 }
-
-function scrollToCurrent() {
-  const li = $('playlist').querySelector('li.cur');
-  if (li) li.scrollIntoView({ block: 'nearest' });
+// Marca la pista actual sin redibujar la lista (no se pierden toques durante el cambio de canción)
+function renderIfTracks() {
+  if ($('paneTracks').hidden) return;
+  const ul = $('tracks');
+  const curId = player.cur?.id;
+  let found = false;
+  ul.querySelectorAll('li.trk').forEach((li, i) => {
+    const isCur = li.dataset.id === curId;
+    if (isCur) found = true;
+    if (li.classList.contains('cur') === isCur) return;
+    li.classList.toggle('cur', isCur);
+    const n = li.querySelector('.n');
+    n.innerHTML = isCur ? '<span class="eqmini"><i></i><i></i><i></i></span>' : String(viewIds.indexOf(li.dataset.id) + 1);
+  });
+  if (!found && curId && viewIds.includes(curId)) renderTracks();
 }
+function scrollToCurrent() { const li = $('tracks').querySelector('li.cur'); if (li) li.scrollIntoView({ block: 'nearest' }); }
 
 async function updateMediaSession() {
   if (!('mediaSession' in navigator)) return;
-  const t = player.cur;
-  if (!t) return;
+  const t = player.cur; if (!t) return;
   let art = [];
   if (player.coverUrl) { URL.revokeObjectURL(player.coverUrl); player.coverUrl = null; }
   try {
     if (t.thumb) art = [{ src: t.thumb, sizes: '320x180', type: 'image/jpeg' }];
-    else if (t.hasCover) {
-      const r = await Blobs.get(t.id);
-      if (r?.cover) { player.coverUrl = URL.createObjectURL(r.cover); art = [{ src: player.coverUrl, sizes: '512x512', type: r.cover.type }]; }
-    }
+    else if (t.hasCover) { const r = await Blobs.get(t.id); if (r?.cover) { player.coverUrl = URL.createObjectURL(r.cover); art = [{ src: player.coverUrl, sizes: '512x512', type: r.cover.type }]; } }
   } catch {}
   if (!art.length) art = [{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }];
   navigator.mediaSession.metadata = new MediaMetadata({ title: t.title || t.name || 'RetroAmp', artist: t.artist || '', album: t.album || 'RetroAmp', artwork: art });
 }
 if ('mediaSession' in navigator) {
-  const ms = navigator.mediaSession;
-  const h = (a, f) => { try { ms.setActionHandler(a, f); } catch {} };
-  h('play', () => doPlay());
-  h('pause', () => audio.pause());
-  h('stop', () => stop());
-  h('previoustrack', () => go(-1));
-  h('nexttrack', () => go(1));
+  const h = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch {} };
+  h('play', () => doPlay()); h('pause', () => audio.pause()); h('stop', () => stop());
+  h('previoustrack', () => go(-1)); h('nexttrack', () => go(1));
   h('seekbackward', d => { audio.currentTime = Math.max(0, audio.currentTime - (d.seekOffset || 10)); });
   h('seekforward', d => { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + (d.seekOffset || 10)); });
-  h('seekto', d => { if (d.fastSeek && audio.fastSeek) audio.fastSeek(d.seekTime); else audio.currentTime = d.seekTime; });
+  h('seekto', d => { audio.currentTime = d.seekTime; });
 }
 
 /* ================= Visualizador ================= */
 const viz = $('viz');
-const vctx = viz.getContext('2d');
-let vizColors = null, vizRunning = false, peaks = new Array(19).fill(0), lastMeter = 0, clipHold = 0;
-let freqBuf = null, timeBuf = null;
-function getVizColors() {
-  const cs = getComputedStyle(document.documentElement);
-  const g = vctx.createLinearGradient(0, viz.height, 0, 0);
-  g.addColorStop(0, cs.getPropertyValue('--viz1').trim());
-  g.addColorStop(0.6, cs.getPropertyValue('--viz2').trim());
-  g.addColorStop(1, cs.getPropertyValue('--viz3').trim());
-  return { grad: g, peak: cs.getPropertyValue('--peak').trim(), line: cs.getPropertyValue('--lcd-fg').trim(), dim: cs.getPropertyValue('--lcd-dim').trim() };
-}
+let vizColors = null, vizRunning = false, peaks = new Float32Array(32), levels = new Float32Array(32), lastMeter = 0, clipHold = 0, freqBuf = null, timeBuf = null;
 function startViz() { if (!vizRunning) { vizRunning = true; requestAnimationFrame(drawViz); } }
-function drawViz(ts) {
-  const W = viz.width, H = viz.height;
-  if (!vizColors) vizColors = getVizColors();
-  vctx.clearRect(0, 0, W, H);
+function drawViz(ts, once = false) {
+  const dpr = devicePixelRatio || 1;
+  const W = Math.round(viz.clientWidth * dpr), H = Math.round(viz.clientHeight * dpr);
+  if (!W) { vizRunning = false; return; }
+  if (viz.width !== W || viz.height !== H) { viz.width = W; viz.height = H; vizColors = null; }
+  const g = viz.getContext('2d');
+  if (!vizColors) {
+    const grad = g.createLinearGradient(0, H, 0, 0);
+    grad.addColorStop(0, cssVar('--vfd')); grad.addColorStop(1, cssVar('--viz-hi'));
+    vizColors = { grad, dim: cssVar('--vfd-dim'), vfd: cssVar('--vfd'), glow: cssVar('--vfd-glow'), blur: parseFloat(cssVar('--glow')) || 0 };
+  }
+  g.clearRect(0, 0, W, H);
   const a = engine.analyser;
   const active = a && !audio.paused && !document.hidden;
-  if (a && settings.vizMode === 0) {
-    if (!freqBuf) freqBuf = new Uint8Array(a.frequencyBinCount);
-    if (active) a.getByteFrequencyData(freqBuf); else freqBuf.fill(0);
-    const nb = 19, bw = 6, gap = 2;
-    const hz = engine.sampleRate / a.fftSize;
+  const nb = 32, gap = Math.max(2, Math.round(W / nb * 0.28)), bw = (W - gap * (nb - 1)) / nb;
+  if (settings.vizMode === 0) {
+    if (a) { if (!freqBuf) freqBuf = new Uint8Array(a.frequencyBinCount); if (active) a.getByteFrequencyData(freqBuf); else freqBuf.fill(0); }
+    const hz = engine.sampleRate && a ? engine.sampleRate / a.fftSize : 1;
     for (let i = 0; i < nb; i++) {
-      const f0 = 40 * Math.pow(16000 / 40, i / nb), f1 = 40 * Math.pow(16000 / 40, (i + 1) / nb);
-      const b0 = Math.max(1, Math.floor(f0 / hz)), b1 = Math.max(b0 + 1, Math.ceil(f1 / hz));
       let v = 0;
-      for (let b = b0; b < b1 && b < freqBuf.length; b++) v = Math.max(v, freqBuf[b]);
-      const hgt = Math.round((v / 255) * H);
-      const x = i * (bw + gap);
-      vctx.fillStyle = vizColors.grad;
-      vctx.fillRect(x, H - hgt, bw, hgt);
-      peaks[i] = Math.max(peaks[i] - 0.6, hgt);
-      vctx.fillStyle = vizColors.peak;
-      if (peaks[i] > 1) vctx.fillRect(x, H - Math.round(peaks[i]) - 1, bw, 1);
+      if (a) {
+        const f0 = 35 * Math.pow(16000 / 35, i / nb), f1 = 35 * Math.pow(16000 / 35, (i + 1) / nb);
+        const b0 = Math.max(1, Math.floor(f0 / hz)), b1 = Math.max(b0 + 1, Math.ceil(f1 / hz));
+        for (let b = b0; b < b1 && b < freqBuf.length; b++) v = Math.max(v, freqBuf[b]);
+      }
+      const target = (v / 255) * H;
+      levels[i] = target > levels[i] ? target : levels[i] * 0.86;
+      const x = i * (bw + gap), hh = Math.max(2 * dpr, levels[i]);
+      g.fillStyle = vizColors.dim;
+      g.fillRect(x, H - 2 * dpr, bw, 2 * dpr);
+      g.fillStyle = vizColors.grad; g.shadowColor = vizColors.glow; g.shadowBlur = vizColors.blur * dpr * .6;
+      const r = Math.min(bw / 2, 3 * dpr);
+      g.beginPath(); g.roundRect ? g.roundRect(x, H - hh, bw, hh, [r, r, 0, 0]) : g.rect(x, H - hh, bw, hh); g.fill();
+      g.shadowBlur = 0;
+      peaks[i] = Math.max(peaks[i] - 0.9 * dpr, levels[i]);
+      if (peaks[i] > 3 * dpr) { g.fillStyle = vizColors.vfd; g.globalAlpha = .9; g.fillRect(x, H - peaks[i] - 3 * dpr, bw, 1.6 * dpr); g.globalAlpha = 1; }
     }
-  } else if (a && settings.vizMode === 1) {
-    if (!timeBuf) timeBuf = new Uint8Array(a.fftSize);
-    if (active) a.getByteTimeDomainData(timeBuf); else timeBuf.fill(128);
-    vctx.strokeStyle = vizColors.line; vctx.lineWidth = 1;
-    vctx.beginPath();
-    for (let x = 0; x < W; x++) {
-      const v = timeBuf[Math.floor(x / W * timeBuf.length)] / 255;
-      const y = v * H;
-      x ? vctx.lineTo(x, y) : vctx.moveTo(x, y);
+  } else if (settings.vizMode === 1) {
+    if (a) { if (!timeBuf) timeBuf = new Uint8Array(a.fftSize); if (active) a.getByteTimeDomainData(timeBuf); else timeBuf.fill(128); }
+    g.strokeStyle = vizColors.vfd; g.lineWidth = 2 * dpr; g.shadowColor = vizColors.glow; g.shadowBlur = vizColors.blur * dpr;
+    g.beginPath();
+    for (let x = 0; x < W; x += 2) {
+      const v = timeBuf ? timeBuf[Math.floor(x / W * timeBuf.length)] / 255 : .5;
+      const y = H / 2 + (v - .5) * H * 1.6;
+      x ? g.lineTo(x, y) : g.moveTo(x, y);
     }
-    vctx.stroke();
+    g.stroke(); g.shadowBlur = 0;
   }
   if (engine.ready && ts - lastMeter > 90) {
     lastMeter = ts;
     const m = engine.meters();
-    if (m.clip) clipHold = ts + 600;
-    $('ledClip').classList.toggle('on', ts < clipHold && !audio.paused);
-    $('ledLim').classList.toggle('on', m.gr < -0.5 && !audio.paused);
+    if (m.clip) clipHold = ts + 700;
+    $('flagClip').classList.toggle('on', ts < clipHold && !audio.paused);
+    $('flagLim').classList.toggle('on', m.gr < -0.5 && !audio.paused);
   }
-  if (!audio.paused || peaks.some(p => p > 1)) requestAnimationFrame(drawViz);
-  else { vizRunning = false; $('ledClip').classList.remove('on'); $('ledLim').classList.remove('on'); }
+  if (once) return;
+  const decaying = levels.some(v => v > 1) || peaks.some(p => p > 1);
+  if (!audio.paused || decaying) requestAnimationFrame(drawViz);
+  else { vizRunning = false; $('flagClip').classList.remove('on'); $('flagLim').classList.remove('on'); }
 }
 
 /* ================= YouTube ================= */
@@ -883,54 +889,59 @@ async function ytSearch(q) {
   if (!q) return;
   $('ytStatus').textContent = 'Buscando…';
   $('ytResults').innerHTML = '';
+  const id = parseYouTubeId(q);
+  if (id) { ytItems = [{ id, title: 'Video ' + id, author: 'Enlace pegado', duration: 0, thumb: `https://i.ytimg.com/vi/${id}/mqdefault.jpg` }]; $('ytStatus').textContent = 'Enlace listo para reproducir'; renderYt(); return; }
+  const errors = [];
+  if (ytn) {
+    try {
+      const items = await ytn.search(q);
+      if (items.length) { ytItems = items; $('ytStatus').textContent = `${items.length} resultados de YouTube`; renderYt(); return; }
+      errors.push('directo: sin resultados');
+    } catch (e) { errors.push('directo: ' + (e.message || e)); }
+  }
   try {
     const r = await yt.search(q);
     ytItems = r.items;
-    $('ytStatus').textContent = `${r.items.length} resultados · fuente: ${host(r.source)}`;
+    $('ytStatus').textContent = `${r.items.length} resultados · ${host(r.source)}`;
     renderYt();
   } catch (e) {
-    $('ytStatus').textContent = 'Sin resultados: ninguna fuente respondió. Revisa Ajustes → YouTube.';
-    console.warn(e.details || e);
+    errors.push(...(e.details || []));
+    $('ytStatus').textContent = NATIVE
+      ? 'YouTube no respondió. Revisa tu conexión o toca Ajustes, Probar YouTube directo.'
+      : 'Sin respuesta. En la versión web configura tu servidor yt-dlp en Ajustes.';
+    console.warn(errors);
   }
 }
 function renderYt() {
   $('ytResults').innerHTML = ytItems.map((x, i) => `
     <li data-i="${i}">
-      <img src="${esc(x.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer">
-      <div class="yt-info">
-        <div class="yt-title">${esc(x.title)}</div>
-        <div class="yt-meta">${esc(x.author)}${x.duration ? ' · ' + fmt(x.duration) : ''}</div>
-        <div class="yt-actions">
-          <button class="tog" data-act="play">▶ REPRODUCIR</button>
-          <button class="tog" data-act="list">+ LISTA</button>
-          <button class="tog" data-act="save">⬇ GUARDAR</button>
+      <img src="${esc(x.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">
+      <div>
+        <div class="tt">${esc(x.title)}</div>
+        <div class="ar">${esc(x.author)}${x.duration ? ' · ' + fmt(x.duration) : ''}</div>
+        <div class="acts">
+          <button class="btn accent" data-act="play">${icon('play')}Escuchar</button>
+          <button class="btn" data-act="list" aria-label="Agregar a una lista">${icon('listadd')}</button>
+          <button class="btn" data-act="save" aria-label="Guardar sin conexión">${icon('download')}</button>
         </div>
       </div>
     </li>`).join('');
 }
 function ytTrack(x) {
   const id = 'yt:' + x.id;
-  let t = tracks.get(id);
-  if (!t) t = { id, kind: 'yt', ytId: x.id, title: x.title, artist: x.author, duration: x.duration || 0, thumb: x.thumb, addedAt: Date.now() };
-  return t;
+  return tracks.get(id) || { id, kind: 'yt', ytId: x.id, title: x.title, artist: x.author, duration: x.duration || 0, thumb: x.thumb, addedAt: Date.now() };
 }
 function ytPlay(x) {
   engine.init(); engine.resume();
   const t = ytTrack(x);
   tracks.set(t.id, t);
-  player.list = [t.id];
-  buildOrder(0);
+  player.list = [t.id]; buildOrder(0);
   playTrack(t.id);
 }
-async function ytAddToList(x) {
-  const t = ytTrack(x);
-  tracks.set(t.id, t);
-  await Tracks.put(t);
-  addToPlaylistSheet([t.id]);
-}
+async function ytAddToList(x) { const t = ytTrack(x); tracks.set(t.id, t); await Tracks.put(t); addToPlaylist([t.id]); }
 async function downloadYouTube(x) {
   toast('Descargando audio…', 60000);
-  for await (const c of yt.candidates(x.id)) {
+  for await (const c of ytCandidates(x.id)) {
     try {
       const res = await fetch(c.url);
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -942,266 +953,291 @@ async function downloadYouTube(x) {
         if (done) break;
         chunks.push(value); got += value.length;
         const now = Date.now();
-        if (now - lastT > 400) { lastT = now; toast(`Descargando ${host(c.source)}: ${total ? Math.round(got / total * 100) + ' %' : (got / 1048576).toFixed(1) + ' MB'}`, 60000); }
+        if (now - lastT > 400) { lastT = now; toast(`Descargando ${total ? Math.round(got / total * 100) + ' %' : (got / 1048576).toFixed(1) + ' MB'}`, 60000); }
       }
       if (got < 30000) throw new Error('respuesta demasiado pequeña');
       const ctype = (res.headers.get('content-type') || '').split(';')[0];
-      const type = ctype.startsWith('audio/') ? ctype : (c.url.includes('opus') || ctype.includes('webm') ? 'audio/webm' : 'audio/mp4');
+      const type = ctype.startsWith('audio/') ? ctype : (ctype.includes('webm') ? 'audio/webm' : 'audio/mp4');
       const blob = new Blob(chunks, { type });
       const id = 'loc:' + uid();
-      const ext = type.includes('webm') ? 'webm' : 'm4a';
-      const t = {
-        id, kind: 'local', ytId: x.id, name: `${x.title}.${ext}`, ext, title: x.title, artist: x.author || '', album: 'YouTube',
-        duration: x.duration || c.meta?.duration || 0, size: blob.size, mime: type, addedAt: Date.now(), hasCover: false, thumb: x.thumb,
-      };
+      const ext = type.includes('webm') ? 'webm' : type.includes('mpeg') ? 'mp3' : 'm4a';
+      const title = (c.meta?.title && x.title.startsWith('Video ')) ? c.meta.title : x.title;
+      const t = { id, kind: 'local', ytId: x.id, name: `${title}.${ext}`, ext, title, artist: (x.author === 'Enlace pegado' ? c.meta?.author : x.author) || '', album: 'YouTube',
+        duration: x.duration || c.meta?.duration || 0, size: blob.size, mime: type, addedAt: Date.now(), hasCover: false, thumb: x.thumb };
       let cover = null;
       try { const r = await fetch(x.thumb, { mode: 'cors' }); if (r.ok) { cover = await r.blob(); t.hasCover = true; delete t.thumb; } } catch {}
       await Blobs.put({ id, blob, cover });
-      await Tracks.put(t);
-      tracks.set(id, t);
-      yt.markGood(c);
+      await Tracks.put(t); tracks.set(id, t);
       refreshLists();
-      toast('Guardado en la biblioteca: ' + x.title, 3500);
+      toast('Guardado en tu biblioteca: ' + title, 3500);
       requestPersist();
       return;
     } catch (e) { console.warn('descarga', c.source, e); }
   }
-  toast('No se pudo descargar desde ninguna fuente', 4000);
+  toast('No se pudo descargar. Revisa Ajustes, YouTube.', 4500);
 }
 
 /* ================= Ajustes ================= */
 async function openSettings() {
-  $('sHaptics').checked = settings.haptics;
-  $('sResume').checked = settings.resume;
-  $('sServer').value = settings.ytServer;
-  $('sPriority').value = settings.ytPriority;
-  $('sFormat').value = settings.ytFormat;
-  $('sPiped').value = settings.pipedList.join('\n');
-  $('sInv').value = settings.invList.join('\n');
-  $('sDecoderState').textContent = isLoaded() ? 'Cargado' : (await isCached()) ? 'Descargado (listo sin conexión)' : 'No descargado';
+  $('sHaptics').checked = settings.haptics; $('sResume').checked = settings.resume;
+  $('sServer').value = settings.ytServer; $('sFormat').value = settings.ytFormat;
+  $('sPiped').value = settings.pipedList.join('\n'); $('sInv').value = settings.invList.join('\n');
+  $('sUsePublic').checked = settings.usePublic; $('sClientsUrl').value = settings.clientsUrl;
+  $('ytModeHint').textContent = NATIVE
+    ? 'La app pide el audio directo a YouTube desde tu teléfono. Si YouTube cambia algo, toca Actualizar clientes o usa tu servidor yt-dlp como respaldo.'
+    : 'En la versión web el navegador no puede hablar directo con YouTube. Usa tu servidor yt-dlp en Termux (http://127.0.0.1:8765) o instala la APK.';
+  $('sDecoderState').textContent = isLoaded() ? 'Listo' : (await isCached()) ? 'Descargado' : '';
   const st = await storageInfo();
-  $('sStorage').textContent = `Usado: ${(st.usage / 1048576).toFixed(1)} MB de ${(st.quota / 1073741824).toFixed(1)} GB · ${st.persisted ? 'protegido contra borrado automático' : 'no protegido'}`;
+  $('sStorage').textContent = `Usas ${(st.usage / 1048576).toFixed(1)} MB de ${(st.quota / 1073741824).toFixed(1)} GB disponibles. ${st.persisted ? 'Protegida: el sistema no la borrará para liberar espacio.' : 'Sin protección: el sistema podría borrarla si se queda sin espacio.'}`;
+  $('verLbl').textContent = 'v' + VERSION + (NATIVE ? ' (APK)' : '');
   applyTheme();
-  $('settings').hidden = false;
+  openSheet($('sheetSettings'));
 }
+function log(msg, reset = false) { const l = $('sLog'); l.hidden = false; if (reset) l.textContent = ''; l.textContent += msg + '\n'; l.scrollTop = l.scrollHeight; }
+
 function wireSettings() {
   $('btnSettings').onclick = openSettings;
-  $('btnTheme').onclick = () => { settings.theme = THEMES[(THEMES.indexOf(settings.theme) + 1) % THEMES.length]; applyTheme(); saveSettings(); toast('Fondo: ' + { dark: 'OSCURO', light: 'BLANCO', neon: 'VERDE NEÓN' }[settings.theme]); };
+  $('btnTheme').onclick = () => { settings.theme = THEMES[(THEMES.indexOf(settings.theme) + 1) % THEMES.length]; applyTheme(); saveSettings(); toast('Fondo ' + THEME_NAME[settings.theme]); };
   document.querySelectorAll('[data-theme-set]').forEach(b => b.onclick = () => { settings.theme = b.dataset.themeSet; applyTheme(); saveSettings(); });
   $('sHaptics').onchange = e => { settings.haptics = e.target.checked; saveSettings(); };
   $('sResume').onchange = e => { settings.resume = e.target.checked; saveSettings(); };
   $('sServer').onchange = e => { settings.ytServer = e.target.value.trim().replace(/\/+$/, ''); saveSettings(); };
-  $('sPriority').onchange = e => { settings.ytPriority = e.target.value; saveSettings(); };
   $('sFormat').onchange = e => { settings.ytFormat = e.target.value; saveSettings(); };
+  $('sUsePublic').onchange = e => { settings.usePublic = e.target.checked; saveSettings(); };
+  $('sClientsUrl').onchange = e => { settings.clientsUrl = e.target.value.trim(); saveSettings(); };
   const lines = v => v.split(/\s+/).map(s => s.trim().replace(/\/+$/, '')).filter(s => /^https?:\/\//.test(s));
   $('sPiped').onchange = e => { settings.pipedList = lines(e.target.value); saveSettings(); };
   $('sInv').onchange = e => { settings.invList = lines(e.target.value); saveSettings(); };
+
   $('sServerTest').onclick = async () => {
     settings.ytServer = $('sServer').value.trim().replace(/\/+$/, ''); saveSettings();
     if (!settings.ytServer) { $('sServerState').textContent = 'Escribe la dirección primero'; return; }
     $('sServerState').textContent = 'Probando…';
+    try { const j = await yt.pingServer(settings.ytServer); $('sServerState').textContent = `Conectado. yt-dlp ${j.yt_dlp || '?'}, motor JS ${j.js_runtime || 'ninguno'}`; }
+    catch (e) { $('sServerState').textContent = 'Sin respuesta: ' + (e.message || e); }
+  };
+
+  $('sTestNative').onclick = async () => {
+    if (!ytn) return;
+    log('Probando YouTube directo…', true);
     try {
-      const j = await yt.pingServer(settings.ytServer);
-      $('sServerState').textContent = `OK · yt-dlp ${j.yt_dlp || '?'} · JS: ${j.js_runtime || 'ninguno'}`;
-    } catch (e) { $('sServerState').textContent = 'Sin respuesta (' + (e.message || e) + ')'; }
+      const t0 = performance.now();
+      const items = await ytn.search('lofi');
+      log(`Búsqueda: ${items.length} resultados en ${Math.round(performance.now() - t0)} ms`);
+      if (!items.length) { log('YouTube no devolvió resultados.'); return; }
+      const vid = items[0].id;
+      log(`Probando audio de: ${items[0].title}`);
+      let ok = false;
+      for await (const c of ytn.candidates(vid, settings.ytFormat !== 'm4a')) {
+        log(`Cliente ${c.client}: URL obtenida (${c.kbps} kbps). Probando descarga…`);
+        try {
+          const r = await fetch(c.url, { headers: { Range: 'bytes=0-65535' } });
+          const n = (await r.arrayBuffer()).byteLength;
+          log(`  HTTP ${r.status}, ${n} bytes recibidos`);
+          if (r.ok && n > 1000) { ok = true; ytn.markGood(c); break; }
+        } catch (e) { log('  Error: ' + (e.message || e)); }
+      }
+      ytn.lastErrors.forEach(e => log('  ' + e));
+      log(ok ? 'Resultado: YouTube directo funciona.' : 'Resultado: ningún cliente entregó audio. Toca Actualizar clientes o configura tu servidor yt-dlp.');
+    } catch (e) { log('Error: ' + (e.message || e)); }
+  };
+  $('sUpdateClients').onclick = async () => {
+    log('Descargando configuración de clientes…', true);
+    try {
+      const cfg = await NativeYouTube.fetchRemoteConfig(settings.clientsUrl);
+      settings.ytClients = cfg; settings.ytClientsAt = Date.now(); saveSettings();
+      log(`Listo: versión ${cfg.version || '?'} con ${cfg.clients.length} clientes (${cfg.clients.map(c => c.id).join(', ')}).`);
+    } catch (e) { log('No se pudo actualizar: ' + (e.message || e) + '. Revisa que el repositorio sea público y la dirección.'); }
   };
   $('sDiscover').onclick = async () => {
-    $('sTestOut').hidden = false; $('sTestOut').textContent = 'Consultando listas oficiales de instancias…';
+    log('Consultando listas oficiales de instancias…', true);
     const r = await yt.discover();
     if (r.piped.length) settings.pipedList = r.piped.slice(0, 12);
     if (r.inv.length) settings.invList = r.inv.slice(0, 12);
     saveSettings();
     $('sPiped').value = settings.pipedList.join('\n'); $('sInv').value = settings.invList.join('\n');
-    $('sTestOut').textContent = `Piped: ${r.piped.length} encontradas · Invidious: ${r.inv.length} con API pública`;
+    log(`Piped: ${r.piped.length} · Invidious con API: ${r.inv.length}`);
   };
   $('sTestAll').onclick = async () => {
-    const out = $('sTestOut'); out.hidden = false; out.textContent = '';
-    const log = s => { out.textContent += s + '\n'; };
-    const srcs = yt.sources();
-    log(`Probando ${srcs.length} fuentes con búsqueda "test"…`);
-    await Promise.all(srcs.map(async s => {
+    log('Probando fuentes con la búsqueda "test"…', true);
+    if (ytn) { try { const t0 = performance.now(); const it = await ytn.search('test'); log(`✓ YouTube directo  ${Math.round(performance.now() - t0)} ms, ${it.length} resultados`); } catch (e) { log('✗ YouTube directo  ' + (e.message || e)); } }
+    await Promise.all(yt.sources().map(async s => {
       const t0 = performance.now();
-      try {
-        const items = await yt['_search_' + s.type](s.base, 'test');
-        log(`✔ ${host(s.base).padEnd(30)} ${s.type.padEnd(7)} ${Math.round(performance.now() - t0)} ms · ${items.length} res.`);
-      } catch (e) { log(`✘ ${host(s.base).padEnd(30)} ${s.type.padEnd(7)} ${e.message || e}`); }
+      try { const items = await yt['_search_' + s.type](s.base, 'test'); log(`✓ ${host(s.base)}  ${Math.round(performance.now() - t0)} ms, ${items.length} resultados`); }
+      catch (e) { log(`✗ ${host(s.base)}  ${e.message || e}`); }
     }));
-    log('Listo. Las fuentes que fallan se saltan solas.');
+    log('Las fuentes que fallan se saltan solas.');
   };
   $('sDecoder').onclick = async () => {
-    try { await loadFFmpeg((m) => { $('sDecoderState').textContent = m; }); $('sDecoderState').textContent = 'Cargado y guardado sin conexión'; }
+    try { await loadFFmpeg(m => { $('sDecoderState').textContent = m; }); $('sDecoderState').textContent = 'Listo, disponible sin conexión'; }
     catch (e) { $('sDecoderState').textContent = 'Error: ' + (e.message || e); }
   };
-  $('sPersist').onclick = async () => { const ok = await requestPersist(); toast(ok ? 'Biblioteca protegida' : 'El navegador no concedió la protección (instala la app para mejorar esto)'); openSettings(); };
+  $('sPersist').onclick = async () => { const ok = await requestPersist(); toast(ok ? 'Biblioteca protegida' : 'El sistema no concedió la protección. Instalar la app ayuda.'); closeSheet($('sheetSettings')); };
   $('sWipe').onclick = async () => {
-    if (!(await confirmSheet('BORRAR TODO', 'Se borrarán todas las pistas importadas, listas y descargas guardadas en RetroAmp. Los archivos de tu teléfono no se tocan. No se puede deshacer.'))) return;
+    closeSheet($('sheetSettings'));
+    if (!(await confirmBox('Borrar biblioteca', 'Se borran las pistas importadas, las listas y las descargas de RetroAmp. Los archivos de tu teléfono no se tocan. No se puede deshacer.', 'Borrar todo'))) return;
     audio.pause(); audio.removeAttribute('src');
     for (const t of [...tracks.values()]) { await Tracks.del(t.id); await Blobs.del(t.id); await Blobs.del('conv:' + t.id); }
     for (const p of playlists) await Playlists.del(p.id);
-    tracks.clear(); playlists = []; player.list = []; player.cur = null; player.plId = LIB;
-    refreshLists(); updateDisplay(); $('settings').hidden = true; toast('Biblioteca borrada');
+    tracks.clear(); playlists = []; player.list = []; player.cur = null; view.plId = null;
+    setTab(view.tab); updateDisplay(); setMarquee('Biblioteca vacía'); toast('Biblioteca borrada');
   };
-  let sleepT = null, sleepEnd = 0, sleepTick = null;
-  $('sSleep').onchange = e => {
-    clearTimeout(sleepT); clearInterval(sleepTick); $('sleepLeft').textContent = '';
-    const min = +e.target.value;
-    if (!min) return;
-    sleepEnd = Date.now() + min * 60000;
-    sleepTick = setInterval(() => { $('sleepLeft').textContent = Math.ceil((sleepEnd - Date.now()) / 60000) + ' min restantes'; }, 15000);
-    $('sleepLeft').textContent = min + ' min restantes';
-    sleepT = setTimeout(async () => {
-      const v0 = engine.s.volume;
-      for (let i = 20; i >= 0; i--) { engine.update({ volume: v0 * i / 20 }); await new Promise(r => setTimeout(r, 500)); }
-      audio.pause(); engine.update({ volume: v0 }); syncDspUI();
-      clearInterval(sleepTick); $('sSleep').value = '0'; $('sleepLeft').textContent = '';
-      toast('Temporizador: reproducción detenida');
-    }, min * 60000);
-    toast(`Se detendrá en ${min} minutos`);
-  };
+}
+
+// Actualiza la configuración de clientes de YouTube en segundo plano una vez al día
+async function autoUpdateClients() {
+  if (!ytn || !settings.clientsUrl || Date.now() - (settings.ytClientsAt || 0) < 24 * 3600e3) return;
+  try { const cfg = await NativeYouTube.fetchRemoteConfig(settings.clientsUrl); settings.ytClients = cfg; settings.ytClientsAt = Date.now(); saveSettings(); }
+  catch { settings.ytClientsAt = Date.now() - 20 * 3600e3; }
+}
+
+/* ================= Temporizador ================= */
+let sleepT = null, sleepEnd = 0, sleepTick = null;
+function setSleep(min) {
+  clearTimeout(sleepT); clearInterval(sleepTick);
+  $('flagSleep').hidden = true; $('timerSub').textContent = 'No';
+  if (!min) return;
+  sleepEnd = Date.now() + min * 60000;
+  const tick = () => { const m = Math.max(0, Math.ceil((sleepEnd - Date.now()) / 60000)); $('timerSub').textContent = `En ${m} min`; $('flagSleep').textContent = `Apagado ${m}′`; $('flagSleep').hidden = false; $('flagSleep').classList.add('on'); };
+  tick(); sleepTick = setInterval(tick, 15000);
+  sleepT = setTimeout(async () => {
+    const v0 = engine.s.volume;
+    for (let i = 20; i >= 0; i--) { engine.update({ volume: v0 * i / 20 }); await new Promise(r => setTimeout(r, 500)); }
+    audio.pause(); engine.update({ volume: v0 });
+    setSleep(0); toast('Temporizador: música detenida');
+  }, min * 60000);
+  toast(`La música se detendrá en ${min} minutos`);
 }
 
 /* ================= Sesión ================= */
 let sessT = 0;
-function saveSessionSoon() {
-  const now = Date.now();
-  if (now - sessT < 5000) return;
-  sessT = now; saveSession();
-}
+function saveSessionSoon() { const now = Date.now(); if (now - sessT < 5000) return; sessT = now; saveSession(); }
 function saveSession() {
   if (!player.cur || player.cur.kind === 'yt') return;
-  kvSet('session', { plId: player.plId, list: player.list, trackId: player.cur.id, time: audio.currentTime || 0, shuffle: player.shuffle, repeat: player.repeat });
+  kvSet('session', { list: player.list, trackId: player.cur.id, time: audio.currentTime || 0, shuffle: player.shuffle, repeat: player.repeat });
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveSession(); else if (!audio.paused) startViz(); });
 window.addEventListener('pagehide', saveSession);
 
-/* ================= Eventos de UI ================= */
+/* ================= Bloqueo ================= */
+function setLocked(v) {
+  locked = v;
+  $('lockVeil').hidden = !v;
+  $('btnLock').classList.toggle('on', v);
+  $('btnLock').innerHTML = icon(v ? 'lock' : 'unlock');
+  $('btnLock').setAttribute('aria-label', v ? 'Controles bloqueados' : 'Bloquear controles');
+}
+
+/* ================= Eventos ================= */
 function wireUI() {
-  $('btnPlay').onclick = () => {
-    engine.init(); engine.resume();
-    if (player.cur && audio.src) { if (audio.paused) doPlay(); else audio.currentTime = 0; }
-    else if (viewIds.length) playFromView(selectedId || viewIds[0]);
-    else toast('Agrega audios o busca en YouTube');
-  };
-  $('btnPause').onclick = () => { if (audio.paused && player.cur) doPlay(); else audio.pause(); };
-  $('btnStop').onclick = stop;
+  $('btnPlay').onclick = togglePlay;
   $('btnPrev').onclick = () => { engine.init(); go(-1); };
   $('btnNext').onclick = () => { engine.init(); go(1); };
-  $('btnEject').onclick = () => $('fileInput').click();
-  $('plAdd').onclick = () => $('fileInput').click();
-  $('plScan').onclick = scanDevice;
-  $('plSort').onclick = sortMenu;
-  $('plMenu').onclick = plMenu;
-  $('fileInput').onchange = e => { addFiles(e.target.files); e.target.value = ''; };
   $('btnShuffle').onclick = () => {
     player.shuffle = !player.shuffle;
-    const curIdx = player.cur ? player.list.indexOf(player.cur.id) : -1;
-    buildOrder(curIdx); updateDisplay();
+    buildOrder(player.cur ? player.list.indexOf(player.cur.id) : -1);
+    updateDisplay(); toast(player.shuffle ? 'Aleatorio activado' : 'Aleatorio desactivado', 1500);
   };
-  $('btnRepeat').onclick = () => { player.repeat = (player.repeat + 1) % 3; updateDisplay(); };
-  $('dispTime').onclick = () => { settings.remain = !settings.remain; saveSettings(); updateTime(); };
-  viz.onclick = () => { settings.vizMode = (settings.vizMode + 1) % 3; saveSettings(); peaks.fill(0); startViz(); };
+  $('btnRepeat').onclick = () => { player.repeat = (player.repeat + 1) % 3; updateDisplay(); toast(['Repetir desactivado', 'Repetir toda la lista', 'Repetir esta canción'][player.repeat], 1500); };
+  $('vfdTime').onclick = () => { settings.remain = !settings.remain; saveSettings(); updateTime(true); };
+  viz.onclick = () => { settings.vizMode = (settings.vizMode + 1) % 3; saveSettings(); peaks.fill(0); levels.fill(0); drawViz(performance.now(), true); startViz(); };
+  $('btnTimer').onclick = () => menu('Apagar la música en', [0, 15, 30, 45, 60, 90].map(m => ({ icon: 'timer', label: m ? `${m} minutos` : 'Desactivar', action: () => setSleep(m) })));
 
-  const seek = $('seek');
-  seek.addEventListener('input', () => {
-    seeking = true;
-    const d = audio.duration;
-    if (isFinite(d)) $('dispTime').textContent = fmt(seek.value / 1000 * d).padStart(5, '0');
+  seekSlider = new Slider($('seek'), {
+    mode: 'absolute', min: 0, max: 1000, step: 1, value: 0, def: 0, label: 'Posición',
+    format: v => fmt(v / 1000 * (audio.duration || 0)),
+    onInput: () => updateTime(), onCommit: v => { const d = audio.duration; if (isFinite(d)) audio.currentTime = v / 1000 * d; },
   });
-  seek.addEventListener('change', () => {
-    const d = audio.duration;
-    if (isFinite(d)) audio.currentTime = seek.value / 1000 * d;
-    seeking = false;
+  $('seek').classList.add('seekbar');
+
+  // Bloqueo: un toque bloquea, desbloquear exige mantener presionado
+  $('btnLock').onclick = () => { if (!locked) { setLocked(true); buzz(15); } };
+  let holdT;
+  const ub = $('btnUnlock');
+  ub.addEventListener('pointerdown', e => { ub.setPointerCapture(e.pointerId); ub.classList.add('holding'); holdT = setTimeout(() => { buzz(25); setLocked(false); ub.classList.remove('holding'); }, 800); });
+  ['pointerup', 'pointercancel'].forEach(ev => ub.addEventListener(ev, () => { clearTimeout(holdT); ub.classList.remove('holding'); }));
+
+  document.querySelectorAll('.tab').forEach(b => b.onclick = () => { if (b.dataset.tab === 'lists' && view.tab === 'lists') view.plId = null; setTab(b.dataset.tab); });
+  $('btnAdd').onclick = () => $('fileInput').click();
+  $('btnScan').onclick = scanDevice;
+  $('btnSort').onclick = sortMenu;
+  $('fileInput').onchange = e => { addFiles(e.target.files); e.target.value = ''; };
+  $('filter').addEventListener('input', renderTracks);
+  $('btnListBack').onclick = () => { view.plId = null; setTab('lists'); };
+  $('btnListMenu').onclick = () => { const pl = curPlaylist(); if (pl) listMenu(pl); };
+  $('btnNewList').onclick = async () => {
+    const name = await askText('Nueva lista', 'Nombre de la lista', '', 'Crear');
+    if (!name) return;
+    const p = { id: 'pl:' + uid(), name, trackIds: [], created: Date.now() };
+    playlists.push(p); await Playlists.put(p); view.plId = p.id; setTab('lists');
+  };
+  $('lists').addEventListener('click', e => {
+    const li = e.target.closest('li[data-pl]'); if (!li) return;
+    const pl = playlists.find(p => p.id === li.dataset.pl); if (!pl) return;
+    if (e.target.closest('[data-plmenu]')) { listMenu(pl); return; }
+    view.plId = pl.id; $('filter').value = ''; setTab('lists');
   });
 
-  document.querySelectorAll('[data-win]').forEach(b => b.onclick = () => {
-    const id = b.dataset.win;
-    settings.showWins[id] = !settings.showWins[id];
-    applyWindows(); saveSettings();
-    if (id === 'winEq' && settings.showWins[id]) drawCurve();
-  });
-  document.querySelectorAll('.shade').forEach(b => b.onclick = () => {
-    const win = b.closest('.win');
-    settings.shaded = settings.shaded || {};
-    settings.shaded[win.id] = !settings.shaded[win.id];
-    applyWindows(); saveSettings();
-    if (win.id === 'winEq') drawCurve();
-  });
-
-  $('plSelect').onchange = e => { player.plId = e.target.value; selectedId = null; renderList(); };
-  $('plFilter').addEventListener('input', renderList);
-
-  const ul = $('playlist');
-  let lastTapId = null, lastTapT = 0;
+  const ul = $('tracks');
   ul.addEventListener('click', e => {
-    const li = e.target.closest('li[data-id]');
-    if (!li) return;
-    const id = li.dataset.id;
-    if (e.target.closest('[data-menu]')) { trackMenu(id); return; }
-    // Un toque reproduce (en móvil); en escritorio también funciona doble clic
-    const now = Date.now();
-    if (matchMedia('(pointer: coarse)').matches || (lastTapId === id && now - lastTapT < 400)) { playFromView(id); lastTapId = null; return; }
-    lastTapId = id; lastTapT = now; selectedId = id; renderList();
+    const emp = e.target.closest('[data-empty]');
+    if (emp) { emp.dataset.empty === 'scan' ? scanDevice() : $('fileInput').click(); return; }
+    const li = e.target.closest('li[data-id]'); if (!li) return;
+    if (e.target.closest('[data-menu]')) { trackMenu(li.dataset.id); return; }
+    playFromView(li.dataset.id);
   });
-  let lpT;
   ul.addEventListener('contextmenu', e => { const li = e.target.closest('li[data-id]'); if (li) { e.preventDefault(); trackMenu(li.dataset.id); } });
-  ul.addEventListener('touchstart', e => { const li = e.target.closest('li[data-id]'); if (li) lpT = setTimeout(() => { buzz(20); trackMenu(li.dataset.id); }, 550); }, { passive: true });
-  ['touchend', 'touchmove', 'touchcancel'].forEach(ev => ul.addEventListener(ev, () => clearTimeout(lpT), { passive: true }));
 
   $('ytForm').onsubmit = e => { e.preventDefault(); $('ytQuery').blur(); ytSearch($('ytQuery').value.trim()); };
   $('ytResults').addEventListener('click', e => {
-    const b = e.target.closest('[data-act]');
-    if (!b) return;
-    const x = ytItems[+b.closest('li').dataset.i];
-    if (!x) return;
+    const b = e.target.closest('[data-act]'); if (!b) return;
+    const x = ytItems[+b.closest('li').dataset.i]; if (!x) return;
     if (b.dataset.act === 'play') ytPlay(x);
     else if (b.dataset.act === 'list') ytAddToList(x);
-    else if (b.dataset.act === 'save') downloadYouTube(x);
+    else downloadYouTube(x);
   });
 
-  // Vibración háptica
-  document.addEventListener('pointerdown', e => {
-    if (e.target.closest('button, .tog, .tbtn, .vs-track, input[type=range], select, li[data-id]')) buzz(8);
-  }, { passive: true });
-  document.addEventListener('input', e => { if (e.target.matches('input[type=search], input[type=url], input:not([type]), textarea, .lcd-input')) buzz(4); });
+  document.addEventListener('pointerdown', e => { if (e.target.closest('button, .sl, .switch, li[data-id]')) buzz(8); }, { passive: true });
+  document.addEventListener('input', e => { if (e.target.matches('input[type=search], input[type=url], input:not([type]), textarea')) buzz(4); });
 
-  // Atajos de teclado (Z X C V B L, espacio, flechas)
   document.addEventListener('keydown', e => {
-    if (e.target.closest('input, textarea, select')) return;
-    const k = e.key.toLowerCase();
-    const map = { z: () => $('btnPrev').click(), x: () => $('btnPlay').click(), c: () => $('btnPause').click(), v: stop, b: () => $('btnNext').click(), l: () => $('fileInput').click(),
-      ' ': () => $('btnPause').click(), arrowright: () => { audio.currentTime += 5; }, arrowleft: () => { audio.currentTime -= 5; },
-      arrowup: () => { engine.update({ volume: clamp(engine.s.volume + 0.05, 0, 1) }); afterDsp(); }, arrowdown: () => { engine.update({ volume: clamp(engine.s.volume - 0.05, 0, 1) }); afterDsp(); } };
+    if (e.target.closest('input, textarea, select') || locked) return;
+    const k = e.key;
+    const map = {
+      ' ': togglePlay, ArrowRight: () => { audio.currentTime += 5; }, ArrowLeft: () => { audio.currentTime -= 5; },
+      ArrowUp: () => { engine.update({ volume: clamp(engine.s.volume + 0.05, 0, 1) }); afterDsp(true); },
+      ArrowDown: () => { engine.update({ volume: clamp(engine.s.volume - 0.05, 0, 1) }); afterDsp(true); },
+      n: () => go(1), p: () => go(-1),
+    };
     if (map[k]) { e.preventDefault(); map[k](); }
   });
-
-  // Arrastrar y soltar archivos (escritorio)
   document.addEventListener('dragover', e => e.preventDefault());
   document.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files); });
+  let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { updateTime(true); drawCurve(); drawViz(performance.now(), true); }, 120); });
 
-  window.addEventListener('resize', () => drawCurve());
+  ['sheetSound', 'sheetVolume', 'sheetMenu', 'sheetSettings'].forEach(id => wireSheet($(id)));
 }
 
 /* ================= Inicio ================= */
 async function init() {
   document.documentElement.classList.toggle('is-native', NATIVE);
-  $('verLbl').textContent = 'v' + VERSION + (NATIVE ? ' · APK' : '');
-  $('verLbl2').textContent = 'v' + VERSION;
+  hydrateIcons();
   const saved = await kvGet('settings', null);
-  if (saved) settings = { ...structuredClone(DEFAULT_SETTINGS), ...saved, showWins: { ...DEFAULT_SETTINGS.showWins, ...(saved.showWins || {}) } };
+  if (saved) settings = { ...structuredClone(DEFAULT_SETTINGS), ...saved };
   const dsp = await kvGet('dsp', null);
   if (dsp) engine.s = { ...structuredClone(DEFAULT_DSP), ...dsp, eq: (dsp.eq || DEFAULT_DSP.eq).slice(0, 10) };
-  applyTheme(); applyWindows();
-  buildEq(); wireDsp(); wireSettings(); wireUI();
-  syncDspUI();
+  buildEq(); buildFx(); renderPresets();
+  wireSound(); wireSettings(); wireUI();
+  setLocked(false);
+  await document.fonts?.ready?.catch?.(() => {});
+  applyTheme(); syncDspUI();
   await loadLibrary();
-  refreshLists();
+  setTab(settings.tab || 'lib');
   updateDisplay();
 
   if (settings.resume) {
     const s = await kvGet('session', null);
     if (s && s.trackId && tracks.has(s.trackId)) {
-      player.plId = playlists.some(p => p.id === s.plId) ? s.plId : LIB;
-      renderPlSelect(); renderList();
       player.list = (s.list || []).filter(id => tracks.has(id));
       if (!player.list.length) player.list = [...viewIds];
       player.shuffle = !!s.shuffle; player.repeat = s.repeat || 0;
@@ -1210,23 +1246,16 @@ async function init() {
     }
   }
 
-  // Compartir desde YouTube hacia la app (PWA instalada)
   const qs = new URLSearchParams(location.search);
   const shared = qs.get('url') || qs.get('text') || qs.get('title');
-  if (shared) {
-    const id = parseYouTubeId(shared);
-    if (id) {
-      settings.showWins.winYt = true; applyWindows();
-      $('ytQuery').value = shared;
-      ytSearch(shared).then(() => toast('Enlace recibido: toca ▶ REPRODUCIR o ⬇ GUARDAR', 4000));
-    }
-    history.replaceState(null, '', location.pathname);
-  }
+  if (shared && parseYouTubeId(shared)) { setTab('yt'); $('ytQuery').value = shared; ytSearch(shared); }
+  if (shared) history.replaceState(null, '', location.pathname);
 
   if (!NATIVE && 'serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
+  autoUpdateClients();
 }
 
 init();
-window.__retroamp = { engine, player, tracks, yt, settings: () => settings };
+window.__retroamp = { engine, player, tracks, yt, ytn, settings: () => settings, setLocked };

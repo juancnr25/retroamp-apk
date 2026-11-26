@@ -2,10 +2,10 @@
 <html lang="es" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>RetroAmp</title>
-<meta name="description" content="Reproductor de audio retro con ecualizador de 10 bandas, efectos DSP y YouTube">
-<meta name="theme-color" content="#15161a">
+<meta name="description" content="Reproductor de audio con ecualizador de 10 bandas, efectos y YouTube">
+<meta name="theme-color" content="#1a1d23">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -13,248 +13,258 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
-<link rel="preload" href="fonts/vt323-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="fonts/silkscreen-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/barlow-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/barlow-semi-condensed-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
 <audio id="audio" crossorigin="anonymous" preload="auto" playsinline></audio>
 
-<div class="app" id="app">
+<div class="shell" id="shell">
+  <header class="top">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="12" width="3" height="8" rx="1"/><rect x="8" y="7" width="3" height="13" rx="1"/><rect x="13" y="4" width="3" height="16" rx="1"/><rect x="18" y="9" width="3" height="11" rx="1"/></svg>
+      <span>RetroAmp</span>
+    </div>
+    <div class="top-actions">
+      <button class="ibtn" id="btnLock" data-icon="lock" aria-label="Bloquear controles" title="Bloquear controles"></button>
+      <button class="ibtn" id="btnTheme" data-icon="theme" aria-label="Cambiar fondo" title="Cambiar fondo"></button>
+      <button class="ibtn" id="btnSettings" data-icon="gear" aria-label="Ajustes" title="Ajustes"></button>
+    </div>
+  </header>
 
-  <!-- ============ VENTANA PRINCIPAL ============ -->
-  <section class="win" id="winMain">
-    <header class="titlebar">
-      <span class="tb-grip"></span>
-      <span class="tb-title">RETROAMP</span>
-      <span class="tb-grip"></span>
-      <button class="tb-btn" id="btnTheme" title="Cambiar fondo" aria-label="Cambiar fondo">◐</button>
-      <button class="tb-btn" id="btnSettings" title="Ajustes" aria-label="Ajustes">⚙</button>
-    </header>
-    <div class="win-body">
-      <div class="display" id="display">
-        <div class="disp-left">
-          <div class="disp-state" id="dispState">■</div>
-          <div class="disp-time" id="dispTime" title="Toca para ver tiempo restante">00:00</div>
-          <canvas class="viz" id="viz" width="152" height="40" title="Toca para cambiar visualización"></canvas>
-        </div>
-        <div class="disp-right">
-          <div class="marquee"><span id="marquee">RETROAMP · ABRE TUS AUDIOS O BUSCA EN YOUTUBE ***</span></div>
-          <div class="disp-info">
-            <span class="lcd-box" id="dispKbps">---</span><span class="lcd-lbl">KBPS</span>
-            <span class="lcd-box" id="dispKhz">--</span><span class="lcd-lbl">KHZ</span>
-          </div>
-          <div class="disp-leds">
-            <span class="led" id="ledSrc">LOCAL</span>
-            <span class="led" id="ledStereo">STEREO</span>
-            <span class="led" id="ledDsp">DSP</span>
-            <span class="led" id="ledLim">LIM</span>
-            <span class="led led-red" id="ledClip">CLIP</span>
-          </div>
+  <section class="deck" id="deck" aria-label="Reproductor">
+    <div class="vfd" id="vfd">
+      <div class="vfd-top">
+        <div class="vfd-state" id="vfdState" aria-hidden="true"></div>
+        <canvas class="vfd-time" id="vfdTime" role="img" aria-label="Tiempo"></canvas>
+        <div class="vfd-specs">
+          <span id="vfdKbps">--- kbps</span>
+          <span id="vfdKhz">-- kHz</span>
+          <span class="flag" id="flagSrc">Local</span>
         </div>
       </div>
-
-      <input type="range" class="seek" id="seek" min="0" max="1000" value="0" step="1" aria-label="Posición">
-
-      <div class="row sliders-row">
-        <label class="mini-slider"><span>VOL</span><input type="range" id="vol" min="0" max="100" value="80" aria-label="Volumen"></label>
-        <label class="mini-slider"><span>BAL</span><input type="range" id="bal" min="-100" max="100" value="0" aria-label="Balance"></label>
+      <div class="vfd-title" aria-live="polite"><span id="marquee">Abre tus audios o busca en YouTube</span></div>
+      <canvas class="viz" id="viz" aria-label="Visualizador, toca para cambiar"></canvas>
+      <div class="vfd-flags">
+        <span class="flag" id="flagDsp">DSP</span>
+        <span class="flag" id="flagStereo">Estéreo</span>
+        <span class="flag" id="flagLim">Limitador</span>
+        <span class="flag warn" id="flagClip">Saturación</span>
+        <span class="flag-spacer"></span>
+        <span class="flag" id="flagSleep" hidden></span>
       </div>
+    </div>
 
-      <div class="transport">
-        <button class="tbtn" id="btnPrev" title="Anterior (Z)" aria-label="Anterior"><svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
-        <button class="tbtn" id="btnPlay" title="Reproducir (X)" aria-label="Reproducir"><svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg></button>
-        <button class="tbtn" id="btnPause" title="Pausa (C)" aria-label="Pausa"><svg viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg></button>
-        <button class="tbtn" id="btnStop" title="Detener (V)" aria-label="Detener"><svg viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg></button>
-        <button class="tbtn" id="btnNext" title="Siguiente (B)" aria-label="Siguiente"><svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
-        <button class="tbtn" id="btnEject" title="Abrir archivos (L)" aria-label="Abrir archivos"><svg viewBox="0 0 24 24"><path d="M12 4l8 9H4zM4 16h16v3H4z"/></svg></button>
-      </div>
+    <div class="seek" id="seekWrap">
+      <span class="t" id="tCur">0:00</span>
+      <div id="seek" class="seekbar"></div>
+      <span class="t" id="tDur">0:00</span>
+    </div>
 
-      <div class="row toggles-row">
-        <button class="tog" id="btnShuffle" aria-pressed="false">ALEATORIO</button>
-        <button class="tog" id="btnRepeat" aria-pressed="false">REPETIR</button>
-        <span class="spacer"></span>
-        <button class="tog small" data-win="winEq" aria-pressed="true">EQ</button>
-        <button class="tog small" data-win="winDsp" aria-pressed="true">DSP</button>
-        <button class="tog small" data-win="winPl" aria-pressed="true">PL</button>
-        <button class="tog small" data-win="winYt" aria-pressed="true">YT</button>
-      </div>
+    <div class="transport">
+      <button class="tbtn small" id="btnShuffle" data-icon="shuffle" aria-label="Aleatorio" aria-pressed="false"></button>
+      <button class="tbtn" id="btnPrev" data-icon="prev" aria-label="Anterior"></button>
+      <button class="tbtn play" id="btnPlay" aria-label="Reproducir"><span class="ic-play"></span></button>
+      <button class="tbtn" id="btnNext" data-icon="next" aria-label="Siguiente"></button>
+      <button class="tbtn small" id="btnRepeat" aria-label="Repetir" aria-pressed="false"><span class="ic-rep"></span></button>
+    </div>
+
+    <div class="quick">
+      <button class="chip" id="btnSound"><span data-icon="sliders"></span><span class="chip-txt"><b>Sonido</b><small id="soundSub">Normal</small></span></button>
+      <button class="chip" id="btnVolume"><span id="volIcon"></span><span class="chip-txt"><b>Volumen</b><small id="volSub">80 %</small></span></button>
+      <button class="chip" id="btnTimer"><span data-icon="timer"></span><span class="chip-txt"><b>Apagado</b><small id="timerSub">No</small></span></button>
+    </div>
+
+    <div class="lockveil" id="lockVeil" hidden>
+      <button class="unlock" id="btnUnlock"><span data-icon="unlock"></span><span>Mantén presionado para desbloquear</span><i class="unlock-bar"></i></button>
     </div>
   </section>
 
-  <!-- ============ ECUALIZADOR ============ -->
-  <section class="win" id="winEq">
-    <header class="titlebar">
-      <span class="tb-grip"></span>
-      <span class="tb-title">ECUALIZADOR</span>
-      <span class="tb-grip"></span>
-      <button class="tb-btn shade" title="Plegar" aria-label="Plegar">▁</button>
-    </header>
-    <div class="win-body">
-      <div class="row eq-top">
-        <button class="tog" id="eqOn" aria-pressed="true">ON</button>
-        <button class="tog" id="eqAuto" aria-pressed="true" title="Compensa la ganancia para evitar saturación">AUTO</button>
-        <canvas class="eq-curve" id="eqCurve" width="300" height="44"></canvas>
-        <button class="tog" id="eqPresets">PRESETS</button>
-      </div>
-      <div class="eq-sliders" id="eqSliders"></div>
-    </div>
-  </section>
+  <section class="lib" aria-label="Música">
+    <nav class="tabs" role="tablist">
+      <button role="tab" class="tab" data-tab="lib" aria-selected="true">Biblioteca</button>
+      <button role="tab" class="tab" data-tab="lists" aria-selected="false">Listas</button>
+      <button role="tab" class="tab" data-tab="yt" aria-selected="false">YouTube</button>
+      <span class="tab-ink" id="tabInk"></span>
+    </nav>
 
-  <!-- ============ DSP ============ -->
-  <section class="win" id="winDsp">
-    <header class="titlebar">
-      <span class="tb-grip"></span>
-      <span class="tb-title">EFECTOS DSP</span>
-      <span class="tb-grip"></span>
-      <button class="tb-btn shade" title="Plegar" aria-label="Plegar">▁</button>
-    </header>
-    <div class="win-body">
-      <div class="dsp-grid">
-        <label class="dsp-ctl"><span class="dsp-name">BASS</span><input type="range" id="dBass" min="-12" max="12" step="0.5" value="0"><output id="oBass">0 dB</output></label>
-        <label class="dsp-ctl"><span class="dsp-name">TREBLE</span><input type="range" id="dTreble" min="-12" max="12" step="0.5" value="0"><output id="oTreble">0 dB</output></label>
-        <label class="dsp-ctl"><span class="dsp-name">ESTÉREO</span><input type="range" id="dWidth" min="0" max="200" step="5" value="100"><output id="oWidth">100 %</output></label>
-        <label class="dsp-ctl"><span class="dsp-name">REVERB</span><input type="range" id="dRevMix" min="0" max="100" step="1" value="0"><output id="oRevMix">0 %</output></label>
-        <label class="dsp-ctl"><span class="dsp-name">SALA</span><input type="range" id="dRevSize" min="0.5" max="6" step="0.1" value="2.2"><output id="oRevSize">2.2 s</output></label>
+    <!-- Biblioteca y listas comparten la vista de pistas -->
+    <div class="pane" id="paneTracks">
+      <div class="pane-head" id="listHead" hidden>
+        <button class="ibtn" id="btnListBack" data-icon="back" aria-label="Volver a listas"></button>
+        <h2 id="listTitle">Lista</h2>
+        <button class="ibtn" id="btnListMenu" data-icon="more" aria-label="Opciones de la lista"></button>
       </div>
-      <div class="row dsp-toggles">
-        <button class="tog" id="dLoud" aria-pressed="false" title="Realza graves y agudos a volumen bajo">LOUDNESS</button>
-        <button class="tog" id="dLim" aria-pressed="true" title="Evita la distorsión por saturación">LIMITADOR</button>
-        <button class="tog" id="dPure" aria-pressed="false" title="Salida directa sin procesamiento">MODO PURO</button>
-        <button class="tog" id="dReset">RESET</button>
+      <div class="toolbar">
+        <label class="field search">
+          <span data-icon="search"></span>
+          <input type="search" id="filter" placeholder="Buscar en tu música" aria-label="Buscar en tu música" autocomplete="off">
+        </label>
+        <button class="ibtn" id="btnSort" data-icon="sort" aria-label="Ordenar"></button>
+        <button class="ibtn native-only" id="btnScan" data-icon="scan" aria-label="Escanear música del teléfono"></button>
+        <button class="ibtn accent" id="btnAdd" data-icon="plus" aria-label="Agregar archivos"></button>
       </div>
+      <div class="count" id="count"></div>
+      <ul class="tracks" id="tracks"></ul>
     </div>
-  </section>
 
-  <!-- ============ LISTA DE REPRODUCCIÓN ============ -->
-  <section class="win" id="winPl">
-    <header class="titlebar">
-      <span class="tb-grip"></span>
-      <span class="tb-title">LISTA DE REPRODUCCIÓN</span>
-      <span class="tb-grip"></span>
-      <button class="tb-btn shade" title="Plegar" aria-label="Plegar">▁</button>
-    </header>
-    <div class="win-body">
-      <div class="row pl-head">
-        <select id="plSelect" aria-label="Lista"></select>
-        <button class="tog" id="plMenu" title="Opciones de lista">LISTA ▾</button>
+    <div class="pane" id="paneLists" hidden>
+      <div class="toolbar">
+        <button class="btn" id="btnNewList"><span data-icon="plus"></span>Nueva lista</button>
       </div>
-      <input type="search" id="plFilter" class="lcd-input" placeholder="Filtrar…" aria-label="Filtrar">
-      <ol class="playlist" id="playlist"></ol>
-      <div class="row pl-foot">
-        <button class="tog" id="plAdd">+ ARCHIVOS</button>
-        <button class="tog native-only" id="plScan">ESCANEAR MÚSICA</button>
-        <button class="tog" id="plSort">ORDENAR</button>
-        <span class="spacer"></span>
-        <span class="pl-total" id="plTotal">0 pistas · 0:00</span>
-      </div>
+      <ul class="lists" id="lists"></ul>
     </div>
-  </section>
 
-  <!-- ============ YOUTUBE ============ -->
-  <section class="win" id="winYt">
-    <header class="titlebar">
-      <span class="tb-grip"></span>
-      <span class="tb-title">YOUTUBE</span>
-      <span class="tb-grip"></span>
-      <button class="tb-btn shade" title="Plegar" aria-label="Plegar">▁</button>
-    </header>
-    <div class="win-body">
-      <form class="row yt-form" id="ytForm">
-        <input type="search" id="ytQuery" class="lcd-input" placeholder="Buscar o pegar enlace de YouTube" aria-label="Buscar en YouTube" enterkeyhint="search">
-        <button class="tog" type="submit">BUSCAR</button>
+    <div class="pane" id="paneYt" hidden>
+      <form class="toolbar" id="ytForm">
+        <label class="field search">
+          <span data-icon="yt"></span>
+          <input type="search" id="ytQuery" placeholder="Busca o pega un enlace de YouTube" aria-label="Buscar en YouTube" enterkeyhint="search" autocomplete="off">
+        </label>
+        <button class="btn accent" type="submit">Buscar</button>
       </form>
-      <div class="yt-status" id="ytStatus">Fuente: automática</div>
-      <ul class="yt-results" id="ytResults"></ul>
+      <div class="count" id="ytStatus"></div>
+      <ul class="yt" id="ytResults"></ul>
     </div>
   </section>
-
-  <footer class="credits">RetroAmp · <span id="verLbl"></span></footer>
 </div>
 
 <input type="file" id="fileInput" multiple accept="audio/*,.mp3,.m4a,.aac,.ogg,.oga,.opus,.flac,.wav,.webm,.wma,.ape,.aif,.aiff,.alac,.wv,.tta,.mpc,.ac3,.dts,.amr,.mka,.mp2,.caf,.spx,.dsf,.mid,.3gp" hidden>
 
-<!-- Hoja de acciones / menú -->
-<div class="sheet" id="sheet" hidden>
-  <div class="sheet-panel win">
-    <header class="titlebar"><span class="tb-grip"></span><span class="tb-title" id="sheetTitle">MENÚ</span><span class="tb-grip"></span><button class="tb-btn" data-close>✕</button></header>
-    <div class="win-body sheet-body" id="sheetBody"></div>
-  </div>
-</div>
-
-<!-- Ajustes -->
-<div class="sheet" id="settings" hidden>
-  <div class="sheet-panel win wide">
-    <header class="titlebar"><span class="tb-grip"></span><span class="tb-title">AJUSTES</span><span class="tb-grip"></span><button class="tb-btn" data-close>✕</button></header>
-    <div class="win-body settings-body">
-      <h3>Fondo</h3>
-      <div class="row" id="themeRow">
-        <button class="tog" data-theme-set="dark">OSCURO</button>
-        <button class="tog" data-theme-set="light">BLANCO</button>
-        <button class="tog" data-theme-set="neon">VERDE NEÓN</button>
+<!-- Hoja: Sonido (ecualizador y efectos) -->
+<div class="sheet" id="sheetSound" hidden>
+  <div class="panel">
+    <div class="grab" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <div class="seg" role="tablist">
+        <button class="seg-btn" data-sound="eq" aria-selected="true">Ecualizador</button>
+        <button class="seg-btn" data-sound="fx" aria-selected="false">Efectos</button>
       </div>
-
-      <h3>General</h3>
-      <label class="chk"><input type="checkbox" id="sHaptics"> Vibración al tocar botones y escribir</label>
-      <label class="chk"><input type="checkbox" id="sResume"> Recordar pista y posición al abrir</label>
-      <div class="row">
-        <span>Temporizador de apagado</span>
-        <select id="sSleep"><option value="0">Apagado</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">60 min</option><option value="90">90 min</option></select>
-        <span id="sleepLeft" class="muted"></span>
+      <button class="ibtn" data-close data-icon="close" aria-label="Cerrar"></button>
+    </div>
+    <div class="sheet-body" id="soundEq">
+      <div class="eq-bar">
+        <label class="switch"><input type="checkbox" id="eqOn"><i></i>Activo</label>
+        <label class="switch" title="Baja la ganancia sola para que no distorsione"><input type="checkbox" id="eqAuto"><i></i>Anti-saturación</label>
       </div>
-
-      <h3>YouTube</h3>
-      <p class="muted">Modo híbrido: tu servidor yt-dlp y las instancias públicas Piped/Invidious se prueban en orden hasta que una responda.</p>
-      <label class="field">Mi servidor yt-dlp
-        <input type="url" id="sServer" class="lcd-input" placeholder="http://127.0.0.1:8765" inputmode="url">
-      </label>
-      <div class="row">
-        <button class="tog" id="sServerTest">PROBAR SERVIDOR</button>
-        <span id="sServerState" class="muted"></span>
+      <canvas class="curve" id="eqCurve"></canvas>
+      <div class="presets" id="presets"></div>
+      <div class="eq" id="eqSliders"></div>
+      <p class="hint">Arrastra cada banda hacia arriba o abajo. Doble toque la deja en 0.</p>
+    </div>
+    <div class="sheet-body" id="soundFx" hidden>
+      <div class="fx" id="fxSliders"></div>
+      <div class="fx-switches">
+        <label class="switch"><input type="checkbox" id="fxLoud"><i></i>Loudness <small>realza graves y agudos a volumen bajo</small></label>
+        <label class="switch"><input type="checkbox" id="fxLim"><i></i>Limitador <small>evita la distorsión al subir graves</small></label>
+        <label class="switch"><input type="checkbox" id="fxPure"><i></i>Modo puro <small>salida directa, sin procesar</small></label>
       </div>
-      <div class="row">
-        <span>Prioridad</span>
-        <select id="sPriority"><option value="server">Mi servidor primero</option><option value="public">Públicas primero</option></select>
-      </div>
-      <div class="row">
-        <span>Formato preferido</span>
-        <select id="sFormat"><option value="opus">Opus (mejor calidad)</option><option value="m4a">AAC/M4A (más compatible)</option></select>
-      </div>
-      <label class="field">Instancias Piped (una por línea)
-        <textarea id="sPiped" rows="4" class="lcd-input"></textarea>
-      </label>
-      <label class="field">Instancias Invidious (una por línea)
-        <textarea id="sInv" rows="4" class="lcd-input"></textarea>
-      </label>
-      <div class="row">
-        <button class="tog" id="sDiscover">ACTUALIZAR INSTANCIAS</button>
-        <button class="tog" id="sTestAll">PROBAR FUENTES</button>
-      </div>
-      <pre class="test-out" id="sTestOut" hidden></pre>
-
-      <h3>Decodificador universal</h3>
-      <p class="muted">Para WMA, APE, ALAC, AIFF, AC3, DTS y otros formatos raros. Se descarga una sola vez (~31 MB) y queda disponible sin conexión.</p>
-      <div class="row">
-        <button class="tog" id="sDecoder">PRECARGAR AHORA</button>
-        <span id="sDecoderState" class="muted"></span>
-      </div>
-
-      <h3>Almacenamiento</h3>
-      <div class="row"><span id="sStorage" class="muted">—</span></div>
-      <div class="row">
-        <button class="tog" id="sPersist">PROTEGER BIBLIOTECA</button>
-        <button class="tog danger" id="sWipe">BORRAR BIBLIOTECA</button>
-      </div>
-
-      <h3>Acerca de</h3>
-      <p class="muted">RetroAmp <span id="verLbl2"></span>. Procesamiento de audio en coma flotante de 32 bits con ecualizador de 10 bandas, bass, treble, loudness, expansor estéreo, reverb y limitador. Atajos de teclado: Z anterior · X reproducir · C pausa · V detener · B siguiente · L abrir.</p>
+      <button class="btn ghost" id="fxReset">Restablecer efectos</button>
     </div>
   </div>
 </div>
 
-<div class="toast" id="toast" hidden></div>
+<!-- Hoja: Volumen -->
+<div class="sheet" id="sheetVolume" hidden>
+  <div class="panel">
+    <div class="grab" aria-hidden="true"></div>
+    <div class="sheet-head"><h3>Volumen y balance</h3><button class="ibtn" data-close data-icon="close" aria-label="Cerrar"></button></div>
+    <div class="sheet-body">
+      <div class="fx" id="volSliders"></div>
+      <p class="hint">Los botones de volumen del teléfono controlan la salida general.</p>
+    </div>
+  </div>
+</div>
 
-<script>window.RETROAMP_VERSION = '1.0.0';</script>
+<!-- Hoja genérica (menús y diálogos) -->
+<div class="sheet" id="sheetMenu" hidden>
+  <div class="panel">
+    <div class="grab" aria-hidden="true"></div>
+    <div class="sheet-head"><h3 id="menuTitle">Opciones</h3><button class="ibtn" data-close data-icon="close" aria-label="Cerrar"></button></div>
+    <div class="sheet-body menu" id="menuBody"></div>
+  </div>
+</div>
+
+<!-- Ajustes -->
+<div class="sheet" id="sheetSettings" hidden>
+  <div class="panel tall">
+    <div class="grab" aria-hidden="true"></div>
+    <div class="sheet-head"><h3>Ajustes</h3><button class="ibtn" data-close data-icon="close" aria-label="Cerrar"></button></div>
+    <div class="sheet-body settings">
+      <section>
+        <h4>Fondo</h4>
+        <div class="themes" id="themeRow">
+          <button class="theme-opt" data-theme-set="dark"><i class="sw sw-dark"></i>Grafito</button>
+          <button class="theme-opt" data-theme-set="light"><i class="sw sw-light"></i>Blanco</button>
+          <button class="theme-opt" data-theme-set="neon"><i class="sw sw-neon"></i>Verde neón</button>
+        </div>
+      </section>
+
+      <section>
+        <h4>General</h4>
+        <label class="switch row"><input type="checkbox" id="sHaptics"><i></i>Vibración al tocar</label>
+        <label class="switch row"><input type="checkbox" id="sResume"><i></i>Retomar la última pista al abrir</label>
+      </section>
+
+      <section>
+        <h4>YouTube</h4>
+        <p class="hint" id="ytModeHint"></p>
+        <div class="native-only">
+          <div class="row-actions">
+            <button class="btn" id="sTestNative">Probar YouTube directo</button>
+            <button class="btn ghost" id="sUpdateClients">Actualizar clientes</button>
+          </div>
+          <label class="field-block">Configuración de clientes (JSON en tu GitHub)
+            <input type="url" id="sClientsUrl" class="input" inputmode="url">
+          </label>
+        </div>
+        <label class="field-block">Mi servidor yt-dlp (opcional)
+          <input type="url" id="sServer" class="input" placeholder="http://127.0.0.1:8765" inputmode="url">
+        </label>
+        <div class="row-actions">
+          <button class="btn" id="sServerTest">Probar servidor</button>
+          <span class="hint" id="sServerState"></span>
+        </div>
+        <label class="field-block">Formato preferido
+          <select id="sFormat" class="input"><option value="opus">Opus (mejor calidad)</option><option value="m4a">AAC (más compatible)</option></select>
+        </label>
+        <details class="adv">
+          <summary>Instancias públicas Piped e Invidious</summary>
+          <label class="field-block">Piped (una por línea)<textarea id="sPiped" rows="4" class="input"></textarea></label>
+          <label class="field-block">Invidious (una por línea)<textarea id="sInv" rows="4" class="input"></textarea></label>
+          <label class="switch row"><input type="checkbox" id="sUsePublic"><i></i>Usar instancias públicas</label>
+          <div class="row-actions">
+            <button class="btn ghost" id="sDiscover">Buscar instancias activas</button>
+          </div>
+        </details>
+        <div class="row-actions"><button class="btn ghost" id="sTestAll">Probar todas las fuentes</button></div>
+        <pre class="log" id="sLog" hidden></pre>
+      </section>
+
+      <section>
+        <h4>Formatos raros</h4>
+        <p class="hint">WMA, APE, ALAC, AIFF, AC3, DTS y otros usan un decodificador de 31 MB. Se descarga una vez y queda disponible sin conexión.</p>
+        <div class="row-actions"><button class="btn" id="sDecoder">Descargar decodificador</button><span class="hint" id="sDecoderState"></span></div>
+      </section>
+
+      <section>
+        <h4>Almacenamiento</h4>
+        <p class="hint" id="sStorage">…</p>
+        <div class="row-actions">
+          <button class="btn" id="sPersist">Proteger biblioteca</button>
+          <button class="btn danger" id="sWipe">Borrar biblioteca</button>
+        </div>
+      </section>
+
+      <p class="about">RetroAmp <span id="verLbl"></span>. Procesamiento en coma flotante de 32 bits. Atajos: espacio reproduce o pausa, flechas adelantan y cambian el volumen.</p>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script>window.RETROAMP_VERSION = '1.1.0';</script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>

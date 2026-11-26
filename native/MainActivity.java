@@ -8,5 +8,9 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(RetroNativePlugin.class);
         super.onCreate(savedInstanceState);
+        // Proxy de audio de YouTube (/_ytproxy) servido desde el mismo origen de la app
+        if (this.bridge != null) {
+            this.bridge.setWebViewClient(new RetroWebViewClient(this.bridge));
+        }
     }
 }

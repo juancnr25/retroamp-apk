@@ -1,12 +1,13 @@
 // RetroAmp · Service Worker (offline-first). Sube VERSION en cada despliegue.
-const VERSION = 'retroamp-v1.0.0';
+const VERSION = 'retroamp-v1.1.0';
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/styles.css',
-  'js/app.js', 'js/db.js', 'js/engine.js', 'js/meta.js', 'js/decoder.js', 'js/youtube.js',
+  'js/app.js', 'js/db.js', 'js/engine.js', 'js/meta.js', 'js/decoder.js', 'js/youtube.js', 'js/ytnative.js', 'js/ui.js',
   'vendor/ffmpeg/index.js', 'vendor/ffmpeg/classes.js', 'vendor/ffmpeg/const.js', 'vendor/ffmpeg/errors.js',
   'vendor/ffmpeg/types.js', 'vendor/ffmpeg/utils.js', 'vendor/ffmpeg/worker.js',
-  'fonts/vt323-latin-400-normal.woff2', 'fonts/vt323-latin-ext-400-normal.woff2',
-  'fonts/silkscreen-latin-400-normal.woff2', 'fonts/silkscreen-latin-700-normal.woff2',
+  'fonts/barlow-latin-400-normal.woff2', 'fonts/barlow-latin-500-normal.woff2', 'fonts/barlow-latin-600-normal.woff2',
+  'fonts/barlow-latin-ext-400-normal.woff2', 'fonts/barlow-latin-ext-500-normal.woff2', 'fonts/barlow-latin-ext-600-normal.woff2',
+  'fonts/barlow-semi-condensed-latin-500-normal.woff2', 'fonts/barlow-semi-condensed-latin-600-normal.woff2',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',
 ];
 const KEEP = ['retroamp-ffmpeg-v1'];
