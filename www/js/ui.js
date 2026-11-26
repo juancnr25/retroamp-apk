@@ -33,6 +33,11 @@ const P = {
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   edit: '<path d="M4.5 19.5 5.5 15 15.5 5l3.5 3.5-10 10z"/>',
   playlist: '<path d="M4 6.5h12M4 11h12M4 15.5h7"/><path d="M15 13.5v6l5-3z" fill="currentColor" stroke="none"/>',
+  radio: '<rect x="3.5" y="8.5" width="17" height="11.5" rx="2.5"/><path d="M7 8.5 16.5 4"/><circle cx="15.5" cy="14.2" r="2.6"/><path d="M6.8 12.5h3.4M6.8 15.8h3.4"/>',
+  refresh: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/>',
+  star: '<path d="m12 4 2.4 5 5.4.6-4 3.7 1.1 5.4L12 16l-4.9 2.7 1.1-5.4-4-3.7 5.4-.6z"/>',
+  staron: '<path d="m12 4 2.4 5 5.4.6-4 3.7 1.1 5.4L12 16l-4.9 2.7 1.1-5.4-4-3.7 5.4-.6z" fill="currentColor"/>',
+  live: '<circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/><path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6M5.4 5.4a9.3 9.3 0 0 0 0 13.2M18.6 5.4a9.3 9.3 0 0 1 0 13.2"/>',
 };
 
 export function icon(name, cls = '') {

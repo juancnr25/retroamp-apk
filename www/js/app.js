@@ -5,9 +5,10 @@ import { readTags, probeDuration } from './meta.js';
 import { transcode, loadFFmpeg, isCached, isLoaded, RARE_EXT } from './decoder.js';
 import { YouTube, DEFAULT_PIPED, DEFAULT_INVIDIOUS, parseYouTubeId } from './youtube.js';
 import { NativeYouTube, BUILTIN_CONFIG, nativeAvailable } from './ytnative.js';
+import { Radios } from './radio.js';
 import { icon, hydrateIcons, Slider, openSheet, closeSheet, wireSheet, drawSevenSeg, vibrate } from './ui.js';
 
-const VERSION = window.RETROAMP_VERSION || '1.1.0';
+const VERSION = window.RETROAMP_VERSION || '1.2.0';
 const $ = id => document.getElementById(id);
 const Cap = window.Capacitor;
 const NATIVE = !!(Cap && typeof Cap.isNativePlatform === 'function' && Cap.isNativePlatform());
@@ -24,6 +25,7 @@ const DEFAULT_SETTINGS = {
   clientsUrl: 'https://raw.githubusercontent.com/juancnr25/retroamp-apk/main/yt-clients.json',
   ytClients: null, ytClientsAt: 0, visitor: null, visitorAt: 0,
   vizMode: 0, customPresets: {}, libSort: 'added', remain: false, tab: 'lib',
+  ytPreload: true, radioFavs: [], radioFilter: 'all',
 };
 
 let settings = structuredClone(DEFAULT_SETTINGS);
@@ -36,9 +38,10 @@ const ytn = nativeAvailable() ? new NativeYouTube(
   () => (settings.visitor && Date.now() - settings.visitorAt < 6 * 3600e3) ? settings.visitor : null,
 ) : null;
 
+const radios = new Radios();
 const tracks = new Map();
 let playlists = [];
-const player = { list: [], order: [], pos: -1, shuffle: false, repeat: 0, cur: null, objUrl: null, coverUrl: null, kbps: 0, token: 0, loading: false };
+const player = { list: [], order: [], pos: -1, shuffle: false, repeat: 0, cur: null, objUrl: null, coverUrl: null, kbps: 0, token: 0, loading: false, buffering: false, stopped: false };
 const view = { tab: 'lib', plId: null };
 let viewIds = [];
 let locked = false;
@@ -339,13 +342,15 @@ function currentIds() {
 
 function setTab(tab) {
   view.tab = tab; settings.tab = tab; saveSettings();
-  const idx = ['lib', 'lists', 'yt'].indexOf(tab);
+  const idx = ['lib', 'lists', 'radio', 'yt'].indexOf(tab);
   document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   $('tabInk').style.transform = `translateX(${idx * 100}%)`;
   const showTracks = tab === 'lib' || (tab === 'lists' && view.plId);
   $('paneTracks').hidden = !showTracks;
   $('paneLists').hidden = !(tab === 'lists' && !view.plId);
   $('paneYt').hidden = tab !== 'yt';
+  $('paneRadio').hidden = tab !== 'radio';
+  if (tab === 'radio') loadRadios();
   $('listHead').hidden = !(tab === 'lists' && view.plId);
   if (showTracks) renderTracks(); else if (tab === 'lists') renderLists();
 }
@@ -392,7 +397,7 @@ function renderLists() {
     return `<li data-pl="${esc(p.id)}"><span class="cover">${icon('playlist')}</span><div><div class="tt">${esc(p.name)}</div><div class="ar">${p.trackIds.length} pistas · ${fmt(dur)}</div></div><span></span><button class="m ibtn" data-plmenu aria-label="Opciones">${icon('more')}</button></li>`;
   }).join('');
 }
-function refreshLists() { if (view.tab === 'lists' && !view.plId) renderLists(); else if (view.tab !== 'yt') renderTracks(); }
+function refreshLists() { if (view.tab === 'lists' && !view.plId) renderLists(); else if (view.tab !== 'yt' && view.tab !== 'radio') renderTracks(); }
 
 async function addFiles(fileList) {
   const files = [...fileList];
@@ -584,13 +589,15 @@ async function convertAndStore(t, blob) {
 async function playTrack(id, { autoplay = true, startAt = 0 } = {}) {
   const t = tracks.get(id); if (!t) return;
   const token = ++player.token;
-  player.cur = t; player.kbps = 0; player.loading = true;
-  // Detiene la canción anterior mientras carga la nueva: así su final no salta a otra pista
-  if (!audio.paused) audio.pause();
+  player.cur = t; player.kbps = 0; player.loading = true; player.buffering = false; player.stopped = false;
+  // Detiene con un fundido la canción anterior mientras carga la nueva: así su final no salta a otra pista
+  await softPause();
+  if (token !== player.token) return;
   updateDisplay(); renderIfTracks(); scrollToCurrent();
   setMarquee('Cargando…');
   try {
-    if (t.kind === 'yt') await playYouTubeStream(t, token);
+    if (t.kind === 'yt') await playYouTube(t, token);
+    else if (t.kind === 'radio') await playRadio(t, token);
     else {
       let blob = await blobFor(t);
       if (token !== player.token) return;
@@ -608,10 +615,11 @@ async function playTrack(id, { autoplay = true, startAt = 0 } = {}) {
       player.kbps = t.size && t.duration ? Math.round(t.size * 8 / t.duration / 1000) : 0;
     }
     if (token !== player.token) return;
-    if (startAt) { try { audio.currentTime = startAt; } catch {} }
+    if (startAt && t.kind !== 'radio') { try { audio.currentTime = startAt; } catch {} }
     player.loading = false;
     updateDisplay(); updateMediaSession(); saveSession();
     if (autoplay) await doPlay();
+    prefetchNextYouTube();
   } catch (e) {
     if (token !== player.token) return;
     player.loading = false;
@@ -628,6 +636,78 @@ async function* ytCandidates(id) {
   yield* yt.candidates(id);
 }
 
+/* ---- YouTube: descarga completa antes de sonar (sin cortes por la red) ---- */
+const ytCache = new Map();          // id de video -> { blob, kbps, meta }
+const YT_CACHE_MAX = 4;
+function cachePut(id, v) {
+  ytCache.delete(id); ytCache.set(id, v);
+  while (ytCache.size > YT_CACHE_MAX) ytCache.delete(ytCache.keys().next().value);
+}
+// Descarga con progreso y detección de bloqueo (si no llegan datos en 15 s, se prueba otra fuente)
+async function fetchAudio(url, onProgress, outerSignal) {
+  const ac = new AbortController();
+  const abort = () => ac.abort();
+  outerSignal?.addEventListener('abort', abort);
+  let stallT = setTimeout(abort, 15000);
+  try {
+    const r = await fetch(url, { signal: ac.signal });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const total = +r.headers.get('content-length') || 0;
+    const reader = r.body.getReader();
+    const chunks = []; let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      clearTimeout(stallT); stallT = setTimeout(abort, 15000);
+      chunks.push(value); got += value.length;
+      onProgress?.(got, total);
+    }
+    if (got < 20000) throw new Error('respuesta vacía');
+    const ctype = (r.headers.get('content-type') || '').split(';')[0];
+    return new Blob(chunks, { type: ctype.startsWith('audio/') ? ctype : 'audio/webm' });
+  } finally { clearTimeout(stallT); outerSignal?.removeEventListener('abort', abort); }
+}
+async function getYouTubeAudio(ytId, onProgress, signal) {
+  if (ytCache.has(ytId)) return ytCache.get(ytId);
+  const tried = [];
+  for await (const c of ytCandidates(ytId)) {
+    if (signal?.aborted) throw new Error('cancelado');
+    try {
+      const blob = await fetchAudio(c.url, (g, tot) => onProgress?.(g, tot, c), signal);
+      if (c.kind === 'native') ytn.markGood(c); else yt.markGood(c);
+      const v = { blob, kbps: c.kbps || 0, meta: c.meta || null, source: c.kind === 'native' ? c.source : host(c.source) };
+      cachePut(ytId, v);
+      return v;
+    } catch (e) { tried.push(`${c.kind === 'native' ? c.source : host(c.source)}: ${e.message || e}`); }
+  }
+  const err = new Error('sin fuente'); err.tried = tried; throw err;
+}
+function applyYtMeta(t, meta) {
+  if (!meta) return;
+  if (meta.title && (!t.title || t.title.startsWith('Video '))) t.title = meta.title;
+  if (meta.author && (!t.artist || t.artist === 'Enlace pegado')) t.artist = meta.author;
+  if (meta.duration && !t.duration) t.duration = meta.duration;
+  if (tracks.has(t.id) && t.kind !== 'radio') Tracks.put(t);
+}
+async function playYouTube(t, token) {
+  if (settings.ytPreload) {
+    try {
+      const v = await getYouTubeAudio(t.ytId, (g, tot) => {
+        if (token === player.token) setMarquee(tot ? `Preparando ${Math.round(g / tot * 100)} %  ·  ${t.title}` : `Preparando ${(g / 1048576).toFixed(1)} MB`);
+      });
+      if (token !== player.token) return;
+      await loadSrc(setObjUrl(v.blob), 15000);
+      player.kbps = v.kbps; applyYtMeta(t, v.meta);
+      $('ytStatus').textContent = 'Sonando desde ' + v.source + (v.kbps ? ` · ${v.kbps} kbps` : '') + ' · sin conexión durante la canción';
+      if (!t.duration && isFinite(audio.duration)) t.duration = audio.duration;
+      return;
+    } catch (e) {
+      if (token !== player.token) return;
+      return failYouTube(e.tried || [e.message]);
+    }
+  }
+  return playYouTubeStream(t, token);
+}
 async function playYouTubeStream(t, token) {
   const tried = [];
   for await (const c of ytCandidates(t.ytId)) {
@@ -635,31 +715,17 @@ async function playYouTubeStream(t, token) {
     const label = c.kind === 'native' ? c.source : host(c.source);
     setMarquee('Conectando con ' + label + '…');
     try {
-      try { await loadSrc(c.url, c.kind === 'server' ? 30000 : 20000); }
-      catch (e) {
-        if (c.kind !== 'native') throw e;
-        // Plan B nativo: descarga completa por el proxy y reproduce desde memoria
-        setMarquee('Descargando audio…');
-        const r = await fetch(c.url);
-        if (!r.ok) throw new Error('proxy HTTP ' + r.status);
-        const b = await r.blob();
-        if (b.size < 20000) throw new Error('respuesta vacía');
-        if (token !== player.token) return;
-        await loadSrc(setObjUrl(b), 15000);
-      }
+      await loadSrc(c.url, c.kind === 'server' ? 30000 : 20000);
       if (c.kind === 'native') ytn.markGood(c); else yt.markGood(c);
-      player.kbps = c.kbps || 0;
-      if (c.meta) {
-        if (c.meta.title && (!t.title || t.title.startsWith('Video '))) t.title = c.meta.title;
-        if (c.meta.author && (!t.artist || t.artist === 'Enlace pegado')) t.artist = c.meta.author;
-        if (c.meta.duration && !t.duration) t.duration = c.meta.duration;
-        if (tracks.has(t.id)) Tracks.put(t);
-      }
+      player.kbps = c.kbps || 0; applyYtMeta(t, c.meta);
       $('ytStatus').textContent = 'Sonando desde ' + label + (c.kbps ? ` · ${c.kbps} kbps` : '');
       if (!t.duration && isFinite(audio.duration)) t.duration = audio.duration;
       return;
     } catch (e) { tried.push(`${label}: ${e.message || e}`); }
   }
+  failYouTube(tried);
+}
+function failYouTube(tried) {
   const nativeErr = ytn ? ytn.lastErrors : [];
   const detail = [...nativeErr, ...tried].slice(0, 4).join(' · ');
   $('ytStatus').textContent = detail ? 'Falló: ' + detail : 'No hay fuentes de YouTube configuradas';
@@ -667,37 +733,131 @@ async function playYouTubeStream(t, token) {
     ? 'YouTube no entregó el audio. Toca Ajustes, Probar YouTube directo, para ver el motivo.'
     : 'Para YouTube en la versión web necesitas tu servidor yt-dlp (Ajustes, YouTube).');
 }
+// Mientras suena una canción, descarga en segundo plano la siguiente de YouTube: el cambio es inmediato
+let prefetchAC = null;
+function prefetchNextYouTube() {
+  if (!settings.ytPreload) return;
+  const p = nextIndex(1);
+  if (p < 0) return;
+  const nt = tracks.get(player.list[player.order[p]]);
+  if (!nt || nt.kind !== 'yt' || ytCache.has(nt.ytId)) return;
+  prefetchAC?.abort();
+  prefetchAC = new AbortController();
+  const sig = prefetchAC.signal;
+  setTimeout(() => { if (!sig.aborted) getYouTubeAudio(nt.ytId, null, sig).catch(() => {}); }, 8000);
+}
 
+/* ---- Radio en vivo ---- */
+let radioTries = 0, metaT = null;
+function radioCandidates(t) {
+  const out = [];
+  if (NATIVE) out.push({ url: '/_radio?u=' + encodeURIComponent(t.url), label: 'directo' });
+  else {
+    if (t.url.startsWith('https://')) out.push({ url: t.url, label: 'directo' });
+    if (settings.ytServer) out.push({ url: settings.ytServer + '/radio?u=' + encodeURIComponent(t.url), label: 'tu servidor' });
+  }
+  return out;
+}
+async function playRadio(t, token) {
+  const cands = radioCandidates(t);
+  if (!cands.length) throw new Error('Esta radio transmite por http: en la versión web necesitas tu servidor yt-dlp (Ajustes) o la APK.');
+  const tried = [];
+  for (const c of cands) {
+    if (token !== player.token) return;
+    setMarquee('Sintonizando ' + t.title + '…');
+    try {
+      await loadSrc(c.url, 20000);
+      player.kbps = t.bitrate || 0;
+      radioTries = 0;
+      radios.click(t.uuid);
+      startRadioMeta(t);
+      return;
+    } catch (e) { tried.push(`${c.label}: ${e.message || e}`); }
+  }
+  throw new Error('La radio no responde (' + tried.join(' · ') + '). Prueba otra emisora.');
+}
+function startRadioMeta(t) {
+  clearInterval(metaT);
+  t.now = '';
+  if (!Native) return;
+  const poll = async () => {
+    if (player.cur !== t) { clearInterval(metaT); return; }
+    try {
+      const r = await Cap.nativePromise('RetroNative', 'radioMeta', {});
+      const now = (r && r.title) || '';
+      if (now !== t.now) { t.now = now; updateDisplay(); updateMediaSession(); }
+    } catch {}
+  };
+  setTimeout(poll, 2500);
+  metaT = setInterval(poll, 8000);
+}
+// Si la radio se corta (red móvil), se reconecta sola hasta 4 veces
+let stallT = null;
+function radioRecover(reason) {
+  const t = player.cur;
+  if (!t || t.kind !== 'radio' || player.loading || player.stopped || (audio.paused && reason !== 'error')) return;
+  if (radioTries >= 4) { toast('La radio se cortó. Toca reproducir para volver a intentar.', 5000); return; }
+  radioTries++;
+  setMarquee(`Reconectando ${t.title} (${radioTries})…`);
+  playTrack(t.id);
+}
+audio.addEventListener('waiting', () => {
+  player.buffering = true; updateDisplay();
+  clearTimeout(stallT);
+  if (player.cur?.kind === 'radio') stallT = setTimeout(() => radioRecover('stall'), 9000);
+});
+audio.addEventListener('playing', () => { player.buffering = false; clearTimeout(stallT); updateDisplay(); });
+audio.addEventListener('error', () => { if (player.cur?.kind === 'radio' && !player.loading) setTimeout(() => radioRecover('error'), 1500); });
+
+/* ---- Reproducir y pausar con fundido corto (sin clics) ---- */
 async function doPlay() {
   engine.init(); await engine.resume();
-  try { await audio.play(); } catch { toast('Toca reproducir para empezar'); }
+  if (engine.ready) { engine.fader.gain.cancelScheduledValues(engine.ctx.currentTime); engine.fader.gain.setValueAtTime(0, engine.ctx.currentTime); }
+  try { await audio.play(); engine.fadeTo(1, 60); }
+  catch { engine.fadeTo(1, 0); toast('Toca reproducir para empezar'); }
+}
+async function softPause() {
+  if (audio.paused) return;
+  if (engine.ready && engine.ctx.state === 'running') { engine.fadeTo(0, 50); await new Promise(r => setTimeout(r, 60)); }
+  audio.pause();
 }
 function nextIndex(dir) {
   const n = player.order.length;
   if (!n) return -1;
   let p = player.pos + dir;
-  if (p >= n) { if (player.repeat === 1) { if (player.shuffle) buildOrder(-1); p = 0; } else return -1; }
-  if (p < 0) p = player.repeat === 1 ? n - 1 : 0;
+  if (p >= n) { if (player.repeat === 1 || player.cur?.kind === 'radio') { if (player.shuffle) buildOrder(-1); p = 0; } else return -1; }
+  if (p < 0) p = (player.repeat === 1 || player.cur?.kind === 'radio') ? n - 1 : 0;
   return p;
 }
 function go(dir) {
   if (!player.list.length) { if (viewIds.length) playFromView(viewIds[0]); return; }
-  if (dir < 0 && audio.currentTime > 4) { audio.currentTime = 0; return; }
+  if (dir < 0 && player.cur?.kind !== 'radio' && audio.currentTime > 4) { audio.currentTime = 0; return; }
   const p = nextIndex(dir);
   if (p < 0) { stop(); return; }
   player.pos = p;
   playTrack(player.list[player.order[p]]);
 }
-function stop() { audio.pause(); try { audio.currentTime = 0; } catch {} updateDisplay(); }
+async function stop() {
+  player.stopped = true;
+  await softPause();
+  if (player.cur?.kind === 'radio') { audio.removeAttribute('src'); audio.load(); clearInterval(metaT); }
+  else { try { audio.currentTime = 0; } catch {} }
+  updateDisplay();
+}
 function togglePlay() {
   engine.init(); engine.resume();
-  if (player.cur && audio.src) { if (audio.paused) doPlay(); else audio.pause(); }
+  if (player.cur?.kind === 'radio') {
+    // En vivo: pausar corta la transmisión; al reanudar se vuelve a sintonizar al momento actual
+    if (!audio.paused) { stop(); return; }
+    playTrack(player.cur.id); return;
+  }
+  if (player.cur && audio.src) { if (audio.paused) doPlay(); else softPause(); }
   else if (viewIds.length) playFromView(viewIds[0]);
   else toast('Agrega audios o busca en YouTube');
 }
 
 audio.addEventListener('ended', () => {
-  if (player.loading) return;
+  if (player.loading || player.cur?.kind === 'radio') return;
   if (player.repeat === 2) { audio.currentTime = 0; doPlay(); return; }
   const p = nextIndex(1);
   if (p < 0) { updateDisplay(); nativeService(false); return; }
@@ -743,15 +903,17 @@ function setMarquee(txt) {
 function updateDisplay() {
   const t = player.cur;
   const playing = !audio.paused && !audio.ended;
-  $('vfdState').innerHTML = player.loading ? '' : icon(playing ? 'play' : 'pause');
+  const live = t?.kind === 'radio';
+  $('vfdState').innerHTML = player.loading || player.buffering ? '<span class="spin"></span>' : icon(playing ? (live ? 'live' : 'play') : 'pause');
   $('vfdState').style.opacity = t ? 1 : 0;
   $('btnPlay').querySelector('.ic-play').innerHTML = icon(playing ? 'pause' : 'play');
   $('btnPlay').setAttribute('aria-label', playing ? 'Pausar' : 'Reproducir');
-  if (t && !player.loading) setMarquee(`${t.artist ? t.artist + ' · ' : ''}${t.title || t.name}`);
+  if (t && !player.loading) setMarquee(live ? `${t.title} · ${t.now || 'En vivo'}` : `${t.artist ? t.artist + ' · ' : ''}${t.title || t.name}`);
+  $('seekWrap').classList.toggle('live', live);
   $('vfdKbps').textContent = player.kbps ? `${player.kbps} kbps` : '--- kbps';
   const khz = t?.sampleRate || engine.sampleRate || 0;
   $('vfdKhz').textContent = khz ? `${(khz / 1000).toFixed(khz % 1000 ? 1 : 0)} kHz` : '-- kHz';
-  $('flagSrc').textContent = !t ? 'Local' : t.kind === 'yt' ? 'YouTube' : t.kind === 'device' ? 'Teléfono' : t.ytId ? 'YouTube' : 'Local';
+  $('flagSrc').textContent = !t ? 'Local' : live ? 'Radio' : t.kind === 'yt' ? 'YouTube' : t.kind === 'device' ? 'Teléfono' : t.ytId ? 'YouTube' : 'Local';
   $('flagSrc').classList.toggle('on', !!t);
   $('flagStereo').classList.toggle('on', !!t);
   $('btnShuffle').setAttribute('aria-pressed', String(player.shuffle));
@@ -767,7 +929,8 @@ function updateTime(force = false) {
   const d = audio.duration, c = audio.currentTime;
   const dragging = seekSlider && seekSlider.el.classList.contains('dragging');
   const shown = dragging && isFinite(d) ? seekSlider.value / 1000 * d : c;
-  const remain = settings.remain && isFinite(d);
+  const live = player.cur?.kind === 'radio';
+  const remain = settings.remain && isFinite(d) && !live;
   const v = Math.max(0, Math.floor(remain ? d - shown : shown));
   const mm = Math.min(99, Math.floor(v / 60)), ss = v % 60;
   const txt = (remain ? '-' : '') + String(mm).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
@@ -776,14 +939,15 @@ function updateTime(force = false) {
     drawSevenSeg($('vfdTime'), txt, { on: cssVar('--vfd'), off: cssVar('--vfd-dim'), glow: cssVar('--vfd-glow'), blur: parseFloat(cssVar('--glow')) || 0 });
   }
   $('tCur').textContent = fmt(shown);
-  $('tDur').textContent = isFinite(d) ? fmt(d) : (player.cur?.duration ? fmt(player.cur.duration) : '0:00');
-  if (seekSlider && !dragging) seekSlider.set(isFinite(d) && d > 0 ? c / d * 1000 : 0);
-  if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && isFinite(d) && d > 0) {
+  $('tDur').textContent = live ? 'En vivo' : isFinite(d) ? fmt(d) : (player.cur?.duration ? fmt(player.cur.duration) : '0:00');
+  if (seekSlider && !dragging) seekSlider.set(!live && isFinite(d) && d > 0 ? c / d * 1000 : 0);
+  if (!live && 'mediaSession' in navigator && navigator.mediaSession.setPositionState && isFinite(d) && d > 0) {
     try { navigator.mediaSession.setPositionState({ duration: d, position: Math.min(c, d), playbackRate: audio.playbackRate }); } catch {}
   }
 }
 // Marca la pista actual sin redibujar la lista (no se pierden toques durante el cambio de canción)
 function renderIfTracks() {
+  if (!$('paneRadio').hidden) { renderRadios(); return; }
   if ($('paneTracks').hidden) return;
   const ul = $('tracks');
   const curId = player.cur?.id;
@@ -806,15 +970,18 @@ async function updateMediaSession() {
   let art = [];
   if (player.coverUrl) { URL.revokeObjectURL(player.coverUrl); player.coverUrl = null; }
   try {
-    if (t.thumb) art = [{ src: t.thumb, sizes: '320x180', type: 'image/jpeg' }];
+    if (t.kind === 'radio' && t.favicon) art = [{ src: t.favicon, sizes: '256x256' }];
+    else if (t.thumb) art = [{ src: t.thumb, sizes: '320x180', type: 'image/jpeg' }];
     else if (t.hasCover) { const r = await Blobs.get(t.id); if (r?.cover) { player.coverUrl = URL.createObjectURL(r.cover); art = [{ src: player.coverUrl, sizes: '512x512', type: r.cover.type }]; } }
   } catch {}
   if (!art.length) art = [{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }];
-  navigator.mediaSession.metadata = new MediaMetadata({ title: t.title || t.name || 'RetroAmp', artist: t.artist || '', album: t.album || 'RetroAmp', artwork: art });
+  navigator.mediaSession.metadata = t.kind === 'radio'
+    ? new MediaMetadata({ title: t.now || t.title, artist: t.now ? t.title : 'En vivo', album: 'Radio', artwork: art })
+    : new MediaMetadata({ title: t.title || t.name || 'RetroAmp', artist: t.artist || '', album: t.album || 'RetroAmp', artwork: art });
 }
 if ('mediaSession' in navigator) {
   const h = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch {} };
-  h('play', () => doPlay()); h('pause', () => audio.pause()); h('stop', () => stop());
+  h('play', () => (player.cur?.kind === 'radio' && !audio.src ? togglePlay() : doPlay())); h('pause', () => (player.cur?.kind === 'radio' ? stop() : softPause())); h('stop', () => stop());
   h('previoustrack', () => go(-1)); h('nexttrack', () => go(1));
   h('seekbackward', d => { audio.currentTime = Math.max(0, audio.currentTime - (d.seekOffset || 10)); });
   h('seekforward', d => { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + (d.seekOffset || 10)); });
@@ -825,8 +992,12 @@ if ('mediaSession' in navigator) {
 const viz = $('viz');
 let vizColors = null, vizRunning = false, peaks = new Float32Array(32), levels = new Float32Array(32), lastMeter = 0, clipHold = 0, freqBuf = null, timeBuf = null;
 function startViz() { if (!vizRunning) { vizRunning = true; requestAnimationFrame(drawViz); } }
+let lastVizT = 0;
 function drawViz(ts, once = false) {
-  const dpr = devicePixelRatio || 1;
+  // 30 cuadros por segundo y resolución máxima 2x: deja la CPU libre para el audio
+  if (!once && ts - lastVizT < 32) { if (!audio.paused || levels.some(v => v > 1)) requestAnimationFrame(drawViz); else vizRunning = false; return; }
+  lastVizT = ts;
+  const dpr = Math.min(2, devicePixelRatio || 1);
   const W = Math.round(viz.clientWidth * dpr), H = Math.round(viz.clientHeight * dpr);
   if (!W) { vizRunning = false; return; }
   if (viz.width !== W || viz.height !== H) { viz.width = W; viz.height = H; vizColors = null; }
@@ -834,7 +1005,7 @@ function drawViz(ts, once = false) {
   if (!vizColors) {
     const grad = g.createLinearGradient(0, H, 0, 0);
     grad.addColorStop(0, cssVar('--vfd')); grad.addColorStop(1, cssVar('--viz-hi'));
-    vizColors = { grad, dim: cssVar('--vfd-dim'), vfd: cssVar('--vfd'), glow: cssVar('--vfd-glow'), blur: parseFloat(cssVar('--glow')) || 0 };
+    vizColors = { grad, dim: cssVar('--vfd-dim'), vfd: cssVar('--vfd') };
   }
   g.clearRect(0, 0, W, H);
   const a = engine.analyser;
@@ -843,37 +1014,37 @@ function drawViz(ts, once = false) {
   if (settings.vizMode === 0) {
     if (a) { if (!freqBuf) freqBuf = new Uint8Array(a.frequencyBinCount); if (active) a.getByteFrequencyData(freqBuf); else freqBuf.fill(0); }
     const hz = engine.sampleRate && a ? engine.sampleRate / a.fftSize : 1;
+    g.fillStyle = vizColors.dim;
+    for (let i = 0; i < nb; i++) g.fillRect(i * (bw + gap), H - 2 * dpr, bw, 2 * dpr);
+    g.fillStyle = vizColors.grad;
     for (let i = 0; i < nb; i++) {
       let v = 0;
       if (a) {
         const f0 = 35 * Math.pow(16000 / 35, i / nb), f1 = 35 * Math.pow(16000 / 35, (i + 1) / nb);
         const b0 = Math.max(1, Math.floor(f0 / hz)), b1 = Math.max(b0 + 1, Math.ceil(f1 / hz));
-        for (let b = b0; b < b1 && b < freqBuf.length; b++) v = Math.max(v, freqBuf[b]);
+        for (let k = b0; k < b1 && k < freqBuf.length; k++) v = Math.max(v, freqBuf[k]);
       }
       const target = (v / 255) * H;
-      levels[i] = target > levels[i] ? target : levels[i] * 0.86;
-      const x = i * (bw + gap), hh = Math.max(2 * dpr, levels[i]);
-      g.fillStyle = vizColors.dim;
-      g.fillRect(x, H - 2 * dpr, bw, 2 * dpr);
-      g.fillStyle = vizColors.grad; g.shadowColor = vizColors.glow; g.shadowBlur = vizColors.blur * dpr * .6;
-      const r = Math.min(bw / 2, 3 * dpr);
-      g.beginPath(); g.roundRect ? g.roundRect(x, H - hh, bw, hh, [r, r, 0, 0]) : g.rect(x, H - hh, bw, hh); g.fill();
-      g.shadowBlur = 0;
-      peaks[i] = Math.max(peaks[i] - 0.9 * dpr, levels[i]);
-      if (peaks[i] > 3 * dpr) { g.fillStyle = vizColors.vfd; g.globalAlpha = .9; g.fillRect(x, H - peaks[i] - 3 * dpr, bw, 1.6 * dpr); g.globalAlpha = 1; }
+      levels[i] = target > levels[i] ? target : levels[i] * 0.84;
+      if (levels[i] > 1) g.fillRect(i * (bw + gap), H - levels[i], bw, levels[i]);
+    }
+    g.fillStyle = vizColors.vfd;
+    for (let i = 0; i < nb; i++) {
+      peaks[i] = Math.max(peaks[i] - 1.6 * dpr, levels[i]);
+      if (peaks[i] > 3 * dpr) g.fillRect(i * (bw + gap), H - peaks[i] - 3 * dpr, bw, 1.5 * dpr);
     }
   } else if (settings.vizMode === 1) {
     if (a) { if (!timeBuf) timeBuf = new Uint8Array(a.fftSize); if (active) a.getByteTimeDomainData(timeBuf); else timeBuf.fill(128); }
-    g.strokeStyle = vizColors.vfd; g.lineWidth = 2 * dpr; g.shadowColor = vizColors.glow; g.shadowBlur = vizColors.blur * dpr;
+    g.strokeStyle = vizColors.vfd; g.lineWidth = 2 * dpr;
     g.beginPath();
-    for (let x = 0; x < W; x += 2) {
+    for (let x = 0; x < W; x += 3) {
       const v = timeBuf ? timeBuf[Math.floor(x / W * timeBuf.length)] / 255 : .5;
       const y = H / 2 + (v - .5) * H * 1.6;
       x ? g.lineTo(x, y) : g.moveTo(x, y);
     }
-    g.stroke(); g.shadowBlur = 0;
-  }
-  if (engine.ready && ts - lastMeter > 90) {
+    g.stroke();
+  } else { levels.fill(0); peaks.fill(0); }
+  if (engine.ready && ts - lastMeter > 120) {
     lastMeter = ts;
     const m = engine.meters();
     if (m.clip) clipHold = ts + 700;
@@ -884,6 +1055,65 @@ function drawViz(ts, once = false) {
   const decaying = levels.some(v => v > 1) || peaks.some(p => p > 1);
   if (!audio.paused || decaying) requestAnimationFrame(drawViz);
   else { vizRunning = false; $('flagClip').classList.remove('on'); $('flagLim').classList.remove('on'); }
+}
+
+/* ================= Radio ================= */
+let radioList = [], radioSearch = null, radioLoading = false;
+async function loadRadios(force = false) {
+  if (radioLoading) return;
+  if (!force && radioList.length) { renderRadios(); return; }
+  const cached = await kvGet('radiosPE', null);
+  if (!force && cached && Date.now() - cached.at < 24 * 3600e3 && cached.list?.length) { radioList = cached.list; renderRadios(); return; }
+  radioLoading = true;
+  $('radioStatus').textContent = 'Cargando radios del Perú…';
+  try {
+    radioList = await radios.peru();
+    kvSet('radiosPE', { at: Date.now(), list: radioList });
+  } catch (e) {
+    if (cached?.list?.length) radioList = cached.list;
+    $('radioStatus').textContent = 'Sin conexión con el directorio de radios. ' + (radioList.length ? 'Muestro la última lista guardada.' : 'Revisa tu internet y toca actualizar.');
+  }
+  radioLoading = false;
+  renderRadios();
+}
+const isFav = uuid => settings.radioFavs.some(f => f.uuid === uuid);
+function stationsShown() {
+  if (radioSearch) return radioSearch;
+  const base = settings.radioFilter === 'fav' ? settings.radioFavs : radioList;
+  const q = $('radioQuery').value.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (!q) return base;
+  return base.filter(s => `${s.title} ${s.artist}`.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').includes(q));
+}
+function renderRadios() {
+  const list = stationsShown();
+  list.forEach(st => { if (!tracks.has(st.id)) tracks.set(st.id, st); });
+  document.querySelectorAll('[data-rfilter]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.rfilter === settings.radioFilter && !radioSearch)));
+  const curId = player.cur?.id;
+  $('radios').innerHTML = list.length ? list.map(st => `
+    <li class="rad${st.id === curId ? ' cur' : ''}" data-rid="${esc(st.id)}">
+      <span class="logo">${st.favicon ? `<img src="${esc(st.favicon)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${icon('radio')}</span>
+      <div class="meta"><div class="tt">${esc(st.title)}</div><div class="ar">${esc(st.id === curId && st.now ? st.now : (st.artist || 'Perú'))}</div></div>
+      <span class="d">${st.bitrate ? st.bitrate + ' kbps' : ''}</span>
+      <button class="m${isFav(st.uuid) ? ' fav' : ''}" data-fav aria-label="${isFav(st.uuid) ? 'Quitar de favoritas' : 'Agregar a favoritas'}">${icon(isFav(st.uuid) ? 'staron' : 'star')}</button>
+    </li>`).join('')
+    : `<li class="empty"><b>${settings.radioFilter === 'fav' && !radioSearch ? 'Sin radios favoritas' : 'Sin resultados'}</b>${settings.radioFilter === 'fav' && !radioSearch ? 'Toca la estrella de una radio para tenerla siempre a mano.' : 'Prueba con otro nombre o toca buscar para ampliar la búsqueda fuera del Perú.'}</li>`;
+  if (!radioLoading && !$('radioStatus').textContent.startsWith('Sin conexión')) {
+    $('radioStatus').textContent = radioSearch ? `${list.length} radios encontradas` : settings.radioFilter === 'fav' ? `${list.length} favoritas` : `${list.length} radios del Perú`;
+  }
+}
+function playStation(id) {
+  engine.init(); engine.resume();
+  const ids = stationsShown().map(s => s.id);
+  player.list = ids;
+  buildOrder(ids.indexOf(id));
+  playTrack(id);
+}
+function toggleFav(id) {
+  const st = tracks.get(id); if (!st) return;
+  if (isFav(st.uuid)) settings.radioFavs = settings.radioFavs.filter(f => f.uuid !== st.uuid);
+  else settings.radioFavs.push({ id: st.id, uuid: st.uuid, kind: 'radio', title: st.title, artist: st.artist, url: st.url, favicon: st.favicon, codec: st.codec, bitrate: st.bitrate });
+  saveSettings(); renderRadios();
+  toast(isFav(st.uuid) ? 'Agregada a favoritas' : 'Quitada de favoritas', 1500);
 }
 
 /* ================= YouTube ================= */
@@ -985,7 +1215,7 @@ async function openSettings() {
   $('sHaptics').checked = settings.haptics; $('sResume').checked = settings.resume;
   $('sServer').value = settings.ytServer; $('sFormat').value = settings.ytFormat;
   $('sPiped').value = settings.pipedList.join('\n'); $('sInv').value = settings.invList.join('\n');
-  $('sUsePublic').checked = settings.usePublic; $('sClientsUrl').value = settings.clientsUrl;
+  $('sUsePublic').checked = settings.usePublic; $('sClientsUrl').value = settings.clientsUrl; $('sYtPreload').checked = settings.ytPreload;
   $('ytModeHint').textContent = NATIVE
     ? 'La app pide el audio directo a YouTube desde tu teléfono. Si YouTube cambia algo, toca Actualizar clientes o usa tu servidor yt-dlp como respaldo.'
     : 'En la versión web el navegador no puede hablar directo con YouTube. Usa tu servidor yt-dlp en Termux (http://127.0.0.1:8765) o instala la APK.';
@@ -1007,6 +1237,7 @@ function wireSettings() {
   $('sServer').onchange = e => { settings.ytServer = e.target.value.trim().replace(/\/+$/, ''); saveSettings(); };
   $('sFormat').onchange = e => { settings.ytFormat = e.target.value; saveSettings(); };
   $('sUsePublic').onchange = e => { settings.usePublic = e.target.checked; saveSettings(); };
+  $('sYtPreload').onchange = e => { settings.ytPreload = e.target.checked; saveSettings(); };
   $('sClientsUrl').onchange = e => { settings.clientsUrl = e.target.value.trim(); saveSettings(); };
   const lines = v => v.split(/\s+/).map(s => s.trim().replace(/\/+$/, '')).filter(s => /^https?:\/\//.test(s));
   $('sPiped').onchange = e => { settings.pipedList = lines(e.target.value); saveSettings(); };
@@ -1116,7 +1347,7 @@ function setSleep(min) {
 let sessT = 0;
 function saveSessionSoon() { const now = Date.now(); if (now - sessT < 5000) return; sessT = now; saveSession(); }
 function saveSession() {
-  if (!player.cur || player.cur.kind === 'yt') return;
+  if (!player.cur || player.cur.kind === 'yt' || player.cur.kind === 'radio') return;
   kvSet('session', { list: player.list, trackId: player.cur.id, time: audio.currentTime || 0, shuffle: player.shuffle, repeat: player.repeat });
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveSession(); else if (!audio.paused) startViz(); });
@@ -1190,6 +1421,24 @@ function wireUI() {
     playFromView(li.dataset.id);
   });
   ul.addEventListener('contextmenu', e => { const li = e.target.closest('li[data-id]'); if (li) { e.preventDefault(); trackMenu(li.dataset.id); } });
+
+  // Radio
+  $('radioQuery').addEventListener('input', () => { radioSearch = null; renderRadios(); });
+  $('radioForm').onsubmit = async e => {
+    e.preventDefault(); $('radioQuery').blur();
+    const q = $('radioQuery').value.trim();
+    if (q.length < 2) { radioSearch = null; renderRadios(); return; }
+    $('radioStatus').textContent = 'Buscando "' + q + '"…';
+    try { radioSearch = await radios.search(q); } catch { radioSearch = null; $('radioStatus').textContent = 'Sin conexión con el directorio de radios.'; }
+    renderRadios();
+  };
+  $('btnRadioReload').onclick = () => { radioSearch = null; $('radioQuery').value = ''; loadRadios(true); };
+  document.querySelectorAll('[data-rfilter]').forEach(b => b.onclick = () => { settings.radioFilter = b.dataset.rfilter; radioSearch = null; saveSettings(); renderRadios(); });
+  $('radios').addEventListener('click', e => {
+    const li = e.target.closest('li[data-rid]'); if (!li) return;
+    if (e.target.closest('[data-fav]')) { toggleFav(li.dataset.rid); return; }
+    playStation(li.dataset.rid);
+  });
 
   $('ytForm').onsubmit = e => { e.preventDefault(); $('ytQuery').blur(); ytSearch($('ytQuery').value.trim()); };
   $('ytResults').addEventListener('click', e => {

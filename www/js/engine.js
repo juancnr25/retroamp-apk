@@ -79,7 +79,6 @@ export class AudioEngine {
     this.split.connect(this.gRL, 1); this.split.connect(this.gRR, 1);
     this.gLL.connect(this.merge, 0, 0); this.gRL.connect(this.merge, 0, 0);
     this.gLR.connect(this.merge, 0, 1); this.gRR.connect(this.merge, 0, 1);
-    this.loudHi.connect(this.split);
 
     // Reverb (convolución con respuesta generada)
     this.revIn = c.createGain();
@@ -87,7 +86,6 @@ export class AudioEngine {
     this.wet = c.createGain();
     this.conv = c.createConvolver();
     this.revOut = c.createGain();
-    this.merge.connect(this.revIn);
     this.revIn.connect(this.dry); this.revIn.connect(this.conv); this.conv.connect(this.wet);
     this.dry.connect(this.revOut); this.wet.connect(this.revOut);
 
@@ -108,7 +106,13 @@ export class AudioEngine {
     this.analyser.smoothingTimeConstant = 0.72;
 
     this.master = c.createGain();
-    this.master.connect(c.destination);
+    // Fader de transiciones: fundidos cortos al pausar, reanudar y cambiar la cadena (evita clics)
+    this.fader = c.createGain();
+    this.master.connect(this.fader);
+    this.fader.connect(c.destination);
+    // Si el sistema suspende el audio (llamada, notificación, ahorro de energía) se reanuda solo
+    c.onstatechange = () => { if (c.state !== 'running' && c.state !== 'closed' && !this.el.paused) c.resume().catch(() => {}); };
+    this._routeKey = '';
 
     this._clipBuf = new Float32Array(this.clipMeter.fftSize);
     this.route();
@@ -119,8 +123,32 @@ export class AudioEngine {
   async resume() { if (this.ctx && this.ctx.state !== 'running') { try { await this.ctx.resume(); } catch {} } }
 
   _disconnectAll() {
-    const nodes = [this.src, this.preamp, this.eq[this.eq.length - 1], this.loudHi, this.revOut, this.pan, this.limiter, this.analyser, this.clipMeter];
+    const nodes = [this.src, this.preamp, this.eq[this.eq.length - 1], this.loudHi, this.merge, this.revOut, this.pan, this.limiter, this.analyser, this.clipMeter];
     nodes.forEach(n => { try { n.disconnect(); } catch {} });
+  }
+
+  key() {
+    const s = this.s;
+    return [s.pure, s.eqOn, s.limiter, s.width !== 1, s.reverbMix > 0].join(',');
+  }
+
+  fadeTo(target, ms) {
+    if (!this.ctx) return;
+    const g = this.fader.gain, t = this.ctx.currentTime;
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(g.value, t);
+    g.linearRampToValueAtTime(target, t + ms / 1000);
+  }
+
+  // Reconstruye la cadena con un fundido de 15 ms si hay música sonando (sin clics)
+  reroute() {
+    if (!this.ctx) return;
+    const k = this.key();
+    if (k === this._routeKey) return;
+    if (this.el.paused) { this.route(); return; }
+    this.fadeTo(0, 15);
+    clearTimeout(this._rt);
+    this._rt = setTimeout(() => { this.route(); this.fadeTo(1, 25); }, 20);
   }
 
   // Reconstruye la cadena según los interruptores
@@ -128,6 +156,7 @@ export class AudioEngine {
     if (!this.ctx) return;
     this._disconnectAll();
     const s = this.s;
+    this._routeKey = this.key();
     if (s.pure) {
       // Modo puro: sin procesamiento salvo volumen y balance
       this.src.connect(this.pan);
@@ -138,8 +167,11 @@ export class AudioEngine {
     this.src.connect(this.preamp);
     if (s.eqOn) { this.preamp.connect(this.eq[0]); this.eq[this.eq.length - 1].connect(this.bassF); }
     else this.preamp.connect(this.bassF);
-    this.loudHi.connect(this.split);
-    this.revOut.connect(this.pan);
+    // Solo se conectan las etapas en uso: la reverb apagada no consume CPU
+    let node = this.loudHi;
+    if (s.width !== 1) { node.connect(this.split); node = this.merge; }
+    if (s.reverbMix > 0) { this._ensureIR(); node.connect(this.revIn); node = this.revOut; }
+    node.connect(this.pan);
     this.pan.connect(this.clipMeter);
     if (s.limiter) { this.pan.connect(this.limiter); this.limiter.connect(this.analyser); }
     else this.pan.connect(this.analyser);
@@ -170,6 +202,11 @@ export class AudioEngine {
     this.route();
   }
 
+  _ensureIR() {
+    const size = Math.min(4, this.s.reverbSize);
+    if (this._irSize !== size) { this.conv.buffer = this._makeIR(size); this._irSize = size; }
+  }
+
   applyGains() {
     if (!this.ctx) return;
     const s = this.s;
@@ -196,10 +233,7 @@ export class AudioEngine {
   applyReverb() {
     if (!this.ctx) return;
     const s = this.s;
-    if (this._irSize !== s.reverbSize) {
-      this.conv.buffer = this._makeIR(s.reverbSize);
-      this._irSize = s.reverbSize;
-    }
+    if (s.reverbMix > 0) this._ensureIR();
     const m = s.reverbMix;
     this._set(this.dry.gain, 1 - m * 0.4);
     this._set(this.wet.gain, m * 0.85);
@@ -235,7 +269,7 @@ export class AudioEngine {
     if (keys.includes('width')) this.applyWidth();
     if (keys.includes('reverbMix') || keys.includes('reverbSize')) this.applyReverb();
     if (keys.includes('balance')) this.applyBalance();
-    if (keys.some(k => ['eqOn', 'limiter', 'pure'].includes(k))) this.route();
+    if (keys.some(k => ['eqOn', 'limiter', 'pure', 'width', 'reverbMix'].includes(k))) this.reroute();
   }
 
   setBand(i, db) { this.s.eq[i] = db; this.s.preset = ''; if (this.ctx) { this._set(this.eq[i].gain, db); this.applyGains(); } }

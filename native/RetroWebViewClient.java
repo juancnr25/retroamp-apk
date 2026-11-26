@@ -21,6 +21,9 @@ public class RetroWebViewClient extends BridgeWebViewClient {
         if (path != null && path.startsWith("/_ytproxy")) {
             return YtProxy.handle(request);
         }
+        if (path != null && path.startsWith("/_radio")) {
+            return RadioProxy.handle(request);
+        }
         return super.shouldInterceptRequest(view, request);
     }
 }

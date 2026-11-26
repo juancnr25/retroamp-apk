@@ -148,6 +148,14 @@ public class RetroNativePlugin extends Plugin {
         }
     }
 
+    /** Título de la canción que suena en la radio actual (metadatos ICY). */
+    @PluginMethod
+    public void radioMeta(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("title", RadioProxy.currentTitle);
+        call.resolve(ret);
+    }
+
     @PluginMethod
     public void stopService(PluginCall call) {
         Context ctx = getContext();

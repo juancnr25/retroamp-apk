@@ -6,6 +6,7 @@ Endpoints
   GET /ping                      -> estado y versión de yt-dlp
   GET /search?q=texto&n=20       -> resultados de búsqueda en JSON
   GET /stream/<id>?fmt=opus|m4a  -> audio con soporte de Range y CORS (reproducir o descargar)
+  GET /radio?u=<url>             -> radio en vivo reenviada con CORS (versión web)
 
 Uso
   python retroamp_server.py              # solo este dispositivo (127.0.0.1:8765)
@@ -153,6 +154,8 @@ class Handler(BaseHTTPRequestHandler):
                                        'js_runtime': ', '.join(RUNTIMES) or None})
             if u.path == '/search':
                 return self.search(qs)
+            if u.path == '/radio':
+                return self.radio((qs.get('u') or [''])[0], head)
             if u.path.startswith('/stream/'):
                 vid = u.path.split('/')[2]
                 fmt = (qs.get('fmt') or ['opus'])[0]
@@ -186,6 +189,30 @@ class Handler(BaseHTTPRequestHandler):
                 'thumb': f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg',
             })
         return self.send_json({'items': items})
+
+    def radio(self, url, head):
+        """Reenvía una radio en vivo con CORS (para la versión web: evita bloqueos http/https)."""
+        if not url.startswith(('http://', 'https://')):
+            return self.send_json({'error': 'url inválida'}, 400)
+        req = urllib.request.Request(url, headers={'User-Agent': 'RetroAmp/1.2', 'Icy-MetaData': '0'})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            ctype = (r.headers.get('Content-Type') or 'audio/mpeg').split(';')[0]
+            if ctype.startswith('text/html'):
+                ctype = 'audio/mpeg'
+            self.send_response(200)
+            self.cors()
+            self.send_header('Content-Type', ctype)
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            if head:
+                return
+            self.close_connection = True
+            while True:
+                buf = r.read(16 * 1024)
+                if not buf:
+                    break
+                self.wfile.write(buf)
 
     def stream(self, vid, fmt, head):
         if len(vid) != 11:

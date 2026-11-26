@@ -85,6 +85,7 @@
     <nav class="tabs" role="tablist">
       <button role="tab" class="tab" data-tab="lib" aria-selected="true">Biblioteca</button>
       <button role="tab" class="tab" data-tab="lists" aria-selected="false">Listas</button>
+      <button role="tab" class="tab" data-tab="radio" aria-selected="false">Radio</button>
       <button role="tab" class="tab" data-tab="yt" aria-selected="false">YouTube</button>
       <span class="tab-ink" id="tabInk"></span>
     </nav>
@@ -114,6 +115,24 @@
         <button class="btn" id="btnNewList"><span data-icon="plus"></span>Nueva lista</button>
       </div>
       <ul class="lists" id="lists"></ul>
+    </div>
+
+    <div class="pane" id="paneRadio" hidden>
+      <form class="toolbar" id="radioForm">
+        <label class="field search">
+          <span data-icon="radio"></span>
+          <input type="search" id="radioQuery" placeholder="Busca una radio, por ejemplo Ritmo" aria-label="Buscar radio" enterkeyhint="search" autocomplete="off">
+        </label>
+        <button class="ibtn" type="button" id="btnRadioReload" data-icon="refresh" aria-label="Actualizar la lista de radios"></button>
+      </form>
+      <div class="radio-head">
+        <div class="seg" role="tablist">
+          <button type="button" class="seg-btn" data-rfilter="all" aria-selected="true">Perú</button>
+          <button type="button" class="seg-btn" data-rfilter="fav" aria-selected="false">Favoritas</button>
+        </div>
+        <span class="count" id="radioStatus"></span>
+      </div>
+      <ul class="radios" id="radios"></ul>
     </div>
 
     <div class="pane" id="paneYt" hidden>
@@ -226,6 +245,7 @@
           <button class="btn" id="sServerTest">Probar servidor</button>
           <span class="hint" id="sServerState"></span>
         </div>
+        <label class="switch row"><input type="checkbox" id="sYtPreload"><i></i>Preparar la canción completa antes de sonar <small>evita cortes con internet lento; tarda unos segundos al empezar</small></label>
         <label class="field-block">Formato preferido
           <select id="sFormat" class="input"><option value="opus">Opus (mejor calidad)</option><option value="m4a">AAC (más compatible)</option></select>
         </label>
@@ -264,7 +284,7 @@
 
 <div class="toast" id="toast" role="status" hidden></div>
 
-<script>window.RETROAMP_VERSION = '1.1.1';</script>
+<script>window.RETROAMP_VERSION = '1.2.0';</script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>

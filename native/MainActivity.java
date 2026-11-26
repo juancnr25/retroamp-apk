@@ -15,6 +15,10 @@ public class MainActivity extends BridgeActivity {
             // Se limita a 115 % para que el reproductor quepa completo en pantalla.
             android.webkit.WebSettings ws = this.bridge.getWebView().getSettings();
             if (ws.getTextZoom() > 115) ws.setTextZoom(115);
+            // Prioridad alta para el proceso que reproduce el audio: MIUI no lo frena con la pantalla apagada
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                this.bridge.getWebView().setRendererPriorityPolicy(android.webkit.WebView.RENDERER_PRIORITY_IMPORTANT, false);
+            }
         }
     }
 }

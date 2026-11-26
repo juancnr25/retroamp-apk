@@ -7,6 +7,21 @@ Misma app que la PWA, más funciones nativas:
 - **Servicio en primer plano**: la música sigue sonando con la pantalla apagada.
 - **Firma fija** (`signing/debug.keystore`): cada APK nueva se instala encima de la anterior y conservas tu biblioteca.
 
+## Cambios de la 1.2
+
+**Audio fluido**
+- La reverb y el expansor estéreo dejan de consumir CPU cuando están apagados. Antes la reverb trabajaba aunque estuviera en 0 %.
+- Pausar, reanudar, cambiar de canción y activar efectos ahora usan fundidos de 15 a 60 ms: se acabaron los clics.
+- YouTube prepara la canción completa antes de sonar y descarga la siguiente mientras escuchas. Un bajón de internet ya no corta la música. Se puede desactivar en Ajustes.
+- El visualizador corre a 30 cuadros por segundo y sin sombras: libera CPU para el audio.
+- El proceso que reproduce el audio tiene prioridad alta frente al ahorro de energía de MIUI, y el audio se reanuda solo si el sistema lo suspende.
+
+**Radios del Perú**
+- Pestaña Radio con las emisoras peruanas del directorio Radio Browser. Ritmo Romántica, La Zona, Moda, Oxígeno, RPP, Exitosa y otras conocidas aparecen primero.
+- Muestra la canción que suena en la radio (cuando la emisora la envía), favoritas con estrella y búsqueda por nombre.
+- Si la señal se cae, la app se reconecta sola hasta 4 veces.
+- El ecualizador y los efectos también funcionan con la radio.
+
 ## Cambios de la 1.1.1
 
 - La app cabe completa en pantalla en teléfonos con letra grande o tamaño de pantalla ampliado (MIUI/HyperOS). Antes el reloj del display empujaba el diseño hacia los costados.
