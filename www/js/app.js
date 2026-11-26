@@ -585,6 +585,8 @@ async function playTrack(id, { autoplay = true, startAt = 0 } = {}) {
   const t = tracks.get(id); if (!t) return;
   const token = ++player.token;
   player.cur = t; player.kbps = 0; player.loading = true;
+  // Detiene la canción anterior mientras carga la nueva: así su final no salta a otra pista
+  if (!audio.paused) audio.pause();
   updateDisplay(); renderIfTracks(); scrollToCurrent();
   setMarquee('Cargando…');
   try {
@@ -695,6 +697,7 @@ function togglePlay() {
 }
 
 audio.addEventListener('ended', () => {
+  if (player.loading) return;
   if (player.repeat === 2) { audio.currentTime = 0; doPlay(); return; }
   const p = nextIndex(1);
   if (p < 0) { updateDisplay(); nativeService(false); return; }

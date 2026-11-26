@@ -7,6 +7,13 @@ Misma app que la PWA, más funciones nativas:
 - **Servicio en primer plano**: la música sigue sonando con la pantalla apagada.
 - **Firma fija** (`signing/debug.keystore`): cada APK nueva se instala encima de la anterior y conservas tu biblioteca.
 
+## Cambios de la 1.1.1
+
+- La app cabe completa en pantalla en teléfonos con letra grande o tamaño de pantalla ampliado (MIUI/HyperOS). Antes el reloj del display empujaba el diseño hacia los costados.
+- El texto del sistema se limita a 115 % dentro de la app para conservar el diseño.
+- Al elegir una canción que tarda en cargar (YouTube o formato raro), la anterior se detiene. Antes su final podía saltar a otra pista y descartar tu elección.
+- Los avisos de abajo ya no bloquean los toques sobre la lista.
+
 ## Cambios de la 1.1
 
 - YouTube funciona sin configurar nada. Si YouTube cambia su sistema, editas `yt-clients.json` en tu repositorio y la app lo descarga sola (una vez al día o con Ajustes > Actualizar clientes). No necesitas recompilar.
