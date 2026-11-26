@@ -1,5 +1,5 @@
 // RetroAmp · Service Worker (offline-first). Sube VERSION en cada despliegue.
-const VERSION = 'retroamp-v1.2.1';
+const VERSION = 'retroamp-v1.2.2';
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/styles.css',
   'js/app.js', 'js/db.js', 'js/engine.js', 'js/meta.js', 'js/decoder.js', 'js/youtube.js', 'js/ytnative.js', 'js/ui.js', 'js/radio.js',

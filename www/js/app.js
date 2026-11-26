@@ -41,7 +41,7 @@ const ytn = nativeAvailable() ? new NativeYouTube(
 const radios = new Radios();
 const tracks = new Map();
 let playlists = [];
-const player = { list: [], order: [], pos: -1, shuffle: false, repeat: 0, cur: null, objUrl: null, coverUrl: null, kbps: 0, token: 0, loading: false, buffering: false, stopped: false };
+const player = { list: [], order: [], pos: -1, shuffle: false, repeat: 0, cur: null, objUrl: null, coverUrl: null, kbps: 0, token: 0, loading: false, buffering: false, stopped: false, raw: false };
 const view = { tab: 'lib', plId: null };
 let viewIds = [];
 let locked = false;
@@ -187,7 +187,7 @@ function buildFx() {
     fx[key] = new Slider(sd, { ...o, label, onInput: v => { o.apply(v); out.textContent = o.format(v); afterDsp(false); }, onCommit: () => afterDsp(true) });
     fx[key].out = out; out.textContent = o.format(o.value);
   };
-  vrow('volume', 'Volumen', { min: 0, max: 100, step: 1, value: Math.round(s.volume * 100), def: 80, format: v => v + ' %', apply: v => engine.update({ volume: v / 100 }) });
+  vrow('volume', 'Volumen', { min: 0, max: 100, step: 1, value: Math.round(s.volume * 100), def: 80, format: v => v + ' %', apply: v => { engine.update({ volume: v / 100 }); rawAudio.volume = Math.pow(v / 100, 2); } });
   vrow('balance', 'Balance', { min: -100, max: 100, step: 1, value: Math.round(s.balance * 100), def: 0, zero: 0, format: v => v === 0 ? 'Centro' : (v < 0 ? 'I ' + -v : 'D ' + v), apply: v => engine.update({ balance: v / 100 }) });
 }
 
@@ -592,6 +592,7 @@ async function playTrack(id, { autoplay = true, startAt = 0 } = {}) {
   player.cur = t; player.kbps = 0; player.loading = true; player.buffering = false; player.stopped = false;
   // Detiene con un fundido la canción anterior mientras carga la nueva: así su final no salta a otra pista
   await softPause();
+  stopRaw();
   if (token !== player.token) return;
   if (t.kind !== 'radio') destroyHls();
   updateDisplay(); renderIfTracks(); scrollToCurrent();
@@ -619,7 +620,7 @@ async function playTrack(id, { autoplay = true, startAt = 0 } = {}) {
     if (startAt && t.kind !== 'radio') { try { audio.currentTime = startAt; } catch {} }
     player.loading = false;
     updateDisplay(); updateMediaSession(); saveSession();
-    if (autoplay) await doPlay();
+    if (autoplay && !player.raw) await doPlay();
     prefetchNextYouTube();
   } catch (e) {
     if (token !== player.token) return;
@@ -806,46 +807,95 @@ function pathWrapper(base) {
     return `${abs}/h/${x.protocol.replace(':', '')}/${x.host}${x.pathname}${x.search}`;
   };
 }
-// Caminos para llegar a una radio: en la APK el proxy nativo; en la web directo (https) o por tu servidor
+// Caminos para llegar a una radio: en la APK el proxy nativo y luego directo; en la web directo (https) o tu servidor
 function radioRoutes(url) {
   const enc = encodeURIComponent;
-  if (NATIVE) return [{ label: 'app', wrap: u => '/_radio?u=' + enc(u), hlsWrap: () => pathWrapper('/_radio') }];
   const r = [];
+  if (NATIVE) r.push({ label: 'app', wrap: u => '/_radio?u=' + enc(u), hlsWrap: () => pathWrapper('/_radio') });
   if (url.startsWith('https://')) r.push({ label: 'directo', wrap: null, hlsWrap: () => null });
-  if (settings.ytServer) r.push({ label: 'tu servidor', wrap: u => settings.ytServer + '/radio?u=' + enc(u), hlsWrap: () => pathWrapper(settings.ytServer + '/radio') });
+  if (!NATIVE && settings.ytServer) r.push({ label: 'tu servidor', wrap: u => settings.ytServer + '/radio?u=' + enc(u), hlsWrap: () => pathWrapper(settings.ytServer + '/radio') });
   return r;
 }
+// Diagnóstico: pide los primeros bytes para saber qué respondió la fuente
+async function probe(url) {
+  try {
+    const ac = new AbortController(); const tt = setTimeout(() => ac.abort(), 6000);
+    const r = await fetch(url, { headers: { Range: 'bytes=0-2047' }, signal: ac.signal });
+    clearTimeout(tt);
+    const ct = (r.headers.get('content-type') || '').split(';')[0];
+    let extra = '';
+    if (ct.startsWith('text/')) { extra = (await r.text()).slice(0, 80).replace(/\s+/g, ' '); } else { try { await r.body?.cancel(); } catch {} }
+    return `HTTP ${r.status} ${ct}${extra ? ' «' + extra + '»' : ''}`;
+  } catch (e) { return e.name === 'AbortError' ? 'sin respuesta' : (e.message || 'bloqueado'); }
+}
+// Último recurso: reproductor simple sin ecualizador (acepta cualquier emisora que el teléfono pueda abrir)
+const rawAudio = new Audio();
+rawAudio.preload = 'none';
+function rawActive() { return player.raw && !!rawAudio.src; }
+function stopRaw() { if (rawAudio.src) { rawAudio.pause(); rawAudio.removeAttribute('src'); rawAudio.load(); } player.raw = false; $('flagDsp').title = ''; }
+function rawPlay(url, timeout = 12000) {
+  return new Promise((resolve, reject) => {
+    const ok = () => { done(); resolve(); };
+    const bad = () => { done(); reject(new Error('código ' + (rawAudio.error?.code || '?'))); };
+    const to = setTimeout(() => { done(); reject(new Error('sin respuesta')); }, timeout);
+    function done() { clearTimeout(to); rawAudio.removeEventListener('playing', ok); rawAudio.removeEventListener('error', bad); }
+    rawAudio.addEventListener('playing', ok); rawAudio.addEventListener('error', bad);
+    rawAudio.volume = Math.pow(engine.s.volume, 2);
+    rawAudio.src = url;
+    rawAudio.play().catch(() => {});
+  });
+}
+['play', 'pause', 'playing'].forEach(ev => rawAudio.addEventListener(ev, () => { if (player.raw) { updateDisplay(); nativeService(!rawAudio.paused); } }));
+
 async function playRadio(t, token) {
   let srcs = radioSources(t);
   const good = (settings.radioGood || {})[t.uuid];
   if (good) srcs = [...srcs.filter(s => s.url === good.url && s.type === good.type), ...srcs.filter(s => !(s.url === good.url && s.type === good.type))];
   const plan = [];
   for (const s of srcs) for (const r of radioRoutes(s.url)) plan.push({ s, r });
-  if (!plan.length) throw new Error('Esta radio transmite por http: en la versión web necesitas tu servidor yt-dlp (Ajustes) o la APK.');
   const tried = [];
   for (let i = 0; i < plan.length; i++) {
     const { s, r } = plan[i];
     if (token !== player.token) return;
-    setMarquee(`Sintonizando ${t.title}${plan.length > 1 ? ` (${i + 1} de ${plan.length})` : ''}…`);
+    setMarquee(`Sintonizando ${t.title} (${i + 1} de ${plan.length + 1})…`);
+    const target = s.type === 'hls' ? null : (r.wrap ? r.wrap(s.url) : s.url);
     try {
-      if (s.type === 'hls') { const w = r.hlsWrap(); await loadHls(w ? w(s.url) : s.url, w); }
-      else { destroyHls(); await loadSrc(r.wrap ? r.wrap(s.url) : s.url, 15000); }
+      if (s.type === 'hls') { const w = r.hlsWrap(); await loadHls(w ? w(s.url) : s.url, w, 15000); }
+      else { destroyHls(); await loadSrc(target, 10000); }
       if (token !== player.token) return;
-      player.kbps = t.bitrate || 0;
-      radioTries = 0;
-      settings.radioGood = { ...(settings.radioGood || {}), [t.uuid]: { url: s.url, type: s.type } };
-      saveSettings();
-      radios.click(t.uuid);
-      startRadioMeta(t);
-      return;
+      return radioOk(t, s);
     } catch (e) {
       destroyHls();
-      tried.push(`${s.type === 'hls' ? 'HLS' : 'audio'} ${r.label}: ${e.message || e}`);
+      let why = e.message || String(e);
+      if (target) why += ' · ' + await probe(target);
+      tried.push(`${host(s.url)} ${s.type === 'hls' ? 'HLS' : 'audio'} (${r.label}): ${why}`);
     }
   }
+  // Último recurso sin ecualizador: el teléfono abre la emisora por su cuenta
+  for (const s of srcs.filter(x => x.type === 'stream' && (NATIVE || x.url.startsWith('https://')))) {
+    if (token !== player.token) return;
+    setMarquee(`Sintonizando ${t.title} (modo simple)…`);
+    try {
+      audio.pause(); audio.removeAttribute('src');
+      player.raw = true;
+      await rawPlay(s.url);
+      if (token !== player.token) { stopRaw(); return; }
+      toast('Esta emisora suena sin ecualizador ni efectos (modo simple).', 4000);
+      return radioOk(t, s);
+    } catch (e) { stopRaw(); tried.push(`${host(s.url)} simple: ${e.message || e}`); }
+  }
   console.warn('radio', t.title, tried);
+  $('radioStatus').textContent = 'Detalle: ' + tried.slice(0, 3).join(' | ');
   if (settings.radioGood?.[t.uuid]) { delete settings.radioGood[t.uuid]; saveSettings(); }
-  throw new Error(`${t.title} no responde en este momento. Prueba otra emisora o vuelve a intentar en unos minutos.`);
+  throw new Error(`${t.title} no responde en este momento. Abajo de la lista de radios ves el detalle del error.`);
+}
+function radioOk(t, s) {
+  player.kbps = t.bitrate || 0;
+  radioTries = 0;
+  settings.radioGood = { ...(settings.radioGood || {}), [t.uuid]: { url: s.url, type: s.type } };
+  saveSettings();
+  radios.click(t.uuid);
+  startRadioMeta(t);
 }
 function startRadioMeta(t) {
   clearInterval(metaT);
@@ -911,7 +961,7 @@ function go(dir) {
 async function stop() {
   player.stopped = true;
   await softPause();
-  if (player.cur?.kind === 'radio') { destroyHls(); audio.removeAttribute('src'); audio.load(); clearInterval(metaT); }
+  if (player.cur?.kind === 'radio') { destroyHls(); stopRaw(); audio.removeAttribute('src'); audio.load(); clearInterval(metaT); }
   else { try { audio.currentTime = 0; } catch {} }
   updateDisplay();
 }
@@ -919,7 +969,7 @@ function togglePlay() {
   engine.init(); engine.resume();
   if (player.cur?.kind === 'radio') {
     // En vivo: pausar corta la transmisión; al reanudar se vuelve a sintonizar al momento actual
-    if (!audio.paused) { stop(); return; }
+    if (!audio.paused || rawActive()) { stop(); return; }
     playTrack(player.cur.id); return;
   }
   if (player.cur && audio.src) { if (audio.paused) doPlay(); else softPause(); }
@@ -973,7 +1023,7 @@ function setMarquee(txt) {
 }
 function updateDisplay() {
   const t = player.cur;
-  const playing = !audio.paused && !audio.ended;
+  const playing = rawActive() ? !rawAudio.paused : (!audio.paused && !audio.ended);
   const live = t?.kind === 'radio';
   $('vfdState').innerHTML = player.loading || player.buffering ? '<span class="spin"></span>' : icon(playing ? (live ? 'live' : 'play') : 'pause');
   $('vfdState').style.opacity = t ? 1 : 0;
@@ -986,6 +1036,7 @@ function updateDisplay() {
   $('vfdKhz').textContent = khz ? `${(khz / 1000).toFixed(khz % 1000 ? 1 : 0)} kHz` : '-- kHz';
   $('flagSrc').textContent = !t ? 'Local' : live ? 'Radio' : t.kind === 'yt' ? 'YouTube' : t.kind === 'device' ? 'Teléfono' : t.ytId ? 'YouTube' : 'Local';
   $('flagSrc').classList.toggle('on', !!t);
+  if (rawActive()) { $('flagDsp').textContent = 'Sin EQ'; $('flagDsp').classList.add('on'); } else if ($('flagDsp').textContent !== 'DSP') $('flagDsp').textContent = 'DSP';
   $('flagStereo').classList.toggle('on', !!t);
   $('btnShuffle').setAttribute('aria-pressed', String(player.shuffle));
   $('btnRepeat').setAttribute('aria-pressed', String(player.repeat > 0));
@@ -1133,13 +1184,17 @@ let radioList = [], radioSearch = null, radioLoading = false;
 async function loadRadios(force = false) {
   if (radioLoading) return;
   if (!force && radioList.length) { renderRadios(); return; }
-  const cached = await kvGet('radiosPE', null);
+  const cached = await kvGet('radiosPE2', null);
   if (!force && cached && Date.now() - cached.at < 24 * 3600e3 && cached.list?.length) { radioList = cached.list; renderRadios(); return; }
   radioLoading = true;
   $('radioStatus').textContent = 'Cargando radios del Perú…';
   try {
     radioList = await radios.peru();
-    kvSet('radiosPE', { at: Date.now(), list: radioList });
+    kvSet('radiosPE2', { at: Date.now(), list: radioList });
+    // Las favoritas guardadas toman los enlaces actualizados
+    let changed = false;
+    settings.radioFavs = settings.radioFavs.map(f => { const n = radioList.find(x => x.uuid === f.uuid); if (n && (n.url !== f.url || n.md !== f.md)) { changed = true; return { ...f, url: n.url, md: n.md, alt: n.alt }; } return f; });
+    if (changed) saveSettings();
   } catch (e) {
     if (cached?.list?.length) radioList = cached.list;
     $('radioStatus').textContent = 'Sin conexión con el directorio de radios. ' + (radioList.length ? 'Muestro la última lista guardada.' : 'Revisa tu internet y toca actualizar.');
@@ -1182,7 +1237,7 @@ function playStation(id) {
 function toggleFav(id) {
   const st = tracks.get(id); if (!st) return;
   if (isFav(st.uuid)) settings.radioFavs = settings.radioFavs.filter(f => f.uuid !== st.uuid);
-  else settings.radioFavs.push({ id: st.id, uuid: st.uuid, kind: 'radio', title: st.title, artist: st.artist, url: st.url, favicon: st.favicon, codec: st.codec, bitrate: st.bitrate });
+  else settings.radioFavs.push({ id: st.id, uuid: st.uuid, kind: 'radio', title: st.title, artist: st.artist, url: st.url, md: st.md || null, alt: st.alt || [], favicon: st.favicon, codec: st.codec, bitrate: st.bitrate });
   saveSettings(); renderRadios();
   toast(isFav(st.uuid) ? 'Agregada a favoritas' : 'Quitada de favoritas', 1500);
 }

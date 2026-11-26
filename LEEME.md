@@ -7,6 +7,19 @@ Misma app que la PWA, más funciones nativas:
 - **Servicio en primer plano**: la música sigue sonando con la pantalla apagada.
 - **Firma fija** (`signing/debug.keystore`): cada APK nueva se instala encima de la anterior y conservas tu biblioteca.
 
+## Cambios de la 1.2.2
+
+- Ritmo Romántica y las demás radios de CRP vuelven a sonar. El directorio tenía enlaces de Mediastream con sesión temporal (parámetros `ote`, `listenerId`) que ya vencieron. La app ahora extrae el identificador fijo de la emisora y usa su enlace estable (`mdstrm.com/audio/<id>/icecast.audio`).
+- Lista propia de 13 radios peruanas con enlaces estables: Ritmo Romántica, Moda, Oxígeno, Radiomar, La Inolvidable, Nueva Q, Planeta, Corazón, Studio 92, Felicidad, Onda Cero, RPP y Exitosa. Funciona aunque el directorio no responda.
+- Si el proxy de la app no logra conectar, se prueba la conexión directa y, como último recurso, el modo simple (suena sin ecualizador).
+- Si una radio falla, debajo de la lista aparece el detalle técnico de cada intento.
+
+## Cambios de la 1.2.1
+
+- Arreglo del error "código 4" en radios. Las emisoras de CRP (Ritmo Romántica, Radiomar y otras) figuran en el directorio con enlaces HLS de Mediastream (`live.m3u8`), que el reproductor no acepta directo.
+- Ahora cada radio prueba en orden: el audio continuo de Mediastream (`icecast.audio`), el enlace original, respaldos de StreamTheWorld para Ritmo Romántica y, al final, la lista HLS con el decodificador hls.js.
+- La app recuerda qué fuente funcionó en cada emisora y la prueba primero la próxima vez.
+
 ## Cambios de la 1.2
 
 **Audio fluido**

@@ -20,12 +20,30 @@ import java.util.Map;
 public final class RadioProxy {
     public static volatile String currentTitle = "";
     public static volatile String currentUrl = "";
+    private static final String UA = "Mozilla/5.0 (Linux; Android 14; 2201123G) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36";
 
     private RadioProxy() {}
 
     public static WebResourceResponse handle(WebResourceRequest request) {
         Uri u = request.getUrl();
-        String target = u.getQueryParameter("u");
+        String target = null;
+        String path = u.getEncodedPath();
+        // Forma de ruta: /_radio/h/<esquema>/<host>/<ruta original>?<consulta>
+        // Conserva la ruta para que las listas HLS resuelvan bien sus segmentos relativos.
+        if (path != null && path.startsWith("/_radio/h/")) {
+            String rest = path.substring("/_radio/h/".length());
+            int a = rest.indexOf('/');
+            if (a > 0) {
+                String scheme = rest.substring(0, a);
+                String hostAndPath = rest.substring(a + 1);
+                if (scheme.equals("http") || scheme.equals("https")) {
+                    String q = u.getEncodedQuery();
+                    target = scheme + "://" + hostAndPath + (q != null && !q.isEmpty() ? "?" + q : "");
+                }
+            }
+        } else {
+            target = u.getQueryParameter("u");
+        }
         if (target == null || !(target.startsWith("http://") || target.startsWith("https://"))) return error(400, "url inválida");
         try {
             HttpURLConnection c = null;
@@ -33,9 +51,12 @@ public final class RadioProxy {
             for (int hop = 0; hop < 6; hop++) {
                 c = (HttpURLConnection) new URL(url).openConnection();
                 c.setInstanceFollowRedirects(false);
-                c.setRequestProperty("User-Agent", "RetroAmp/1.2 (Android)");
-                c.setRequestProperty("Icy-MetaData", "1");
+                // Agente de navegador: algunos servidores de radio rechazan agentes desconocidos
+                c.setRequestProperty("User-Agent", UA);
+                boolean segment = url.contains(".m3u8") || url.contains(".ts") || url.contains(".m4s");
+                if (!segment) c.setRequestProperty("Icy-MetaData", "1");
                 c.setRequestProperty("Accept", "*/*");
+                c.setRequestProperty("Accept-Language", "es-PE,es;q=0.9");
                 c.setConnectTimeout(12000);
                 c.setReadTimeout(30000);
                 int code = c.getResponseCode();
@@ -65,8 +86,10 @@ public final class RadioProxy {
                 if (mi != null) metaint = Integer.parseInt(mi.trim());
             } catch (NumberFormatException ignored) {
             }
-            currentTitle = "";
-            currentUrl = target;
+            if (metaint > 0 || !target.equals(currentUrl) && !(target.contains(".ts") || target.contains(".m4s"))) {
+                currentTitle = "";
+                currentUrl = target;
+            }
             InputStream raw = c.getInputStream();
             InputStream body = metaint > 0 ? new IcyStream(raw, metaint, target) : raw;
 
